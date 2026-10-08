@@ -63,6 +63,18 @@ def test_parse_version_stops_at_the_first_non_numeric_part():
     assert updater.parse_version("v1.2.3-rc1") == (1, 2, 3)
 
 
+def test_the_forks_own_release_suffix_orders_after_its_base_version():
+    assert updater.parse_version("v1.3.1+jack.2") == (1, 3, 1, 2)
+    assert updater.is_newer("1.3.1+jack.2", "1.3.1+jack.1")
+    assert updater.is_newer("1.3.1+jack.1", "1.3.1")
+    assert not updater.is_newer("1.3.1+jack.1", "1.3.1+jack.1")
+    # a later upstream-style base version still outranks the suffix
+    assert updater.is_newer("1.3.2", "1.3.1+jack.9")
+    # "jack" with no number after it, or with nothing before it, is ignored
+    assert updater.parse_version("1.3.1-jack") == (1, 3, 1)
+    assert updater.parse_version("jack.4") == (0,)
+
+
 # ---- checking ----
 
 def test_check_returns_none_when_already_current():
@@ -357,8 +369,8 @@ def test_install_prefers_a_real_venv_over_the_user_site(tmp_path, monkeypatch):
 def test_update_source_is_hardcoded_not_configurable():
     """A compromised config file must not be able to point the updater at a
     different repository."""
-    assert updater.CLONE_URL == "https://github.com/DevDock-AI/claude-unlimited.git"
-    assert updater.RELEASES_LATEST_URL.startswith("https://api.github.com/repos/DevDock-AI/claude-unlimited/")
+    assert updater.CLONE_URL == "https://github.com/makerxyz/claude-unlimited.git"
+    assert updater.RELEASES_LATEST_URL.startswith("https://api.github.com/repos/makerxyz/claude-unlimited/")
     source = Path(updater.__file__).read_text()
     assert "load_pool" not in source and "update_settings" not in source
 

@@ -39,7 +39,7 @@ Yes, and here is what that claim rests on — verify any of it yourself:
 ## Installing
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DevDock-AI/claude-unlimited/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/makerxyz/claude-unlimited/main/install.sh | bash
 claude-unlimited doctor
 ```
 
@@ -137,7 +137,8 @@ injected, so the suite runs offline and cannot spend someone's quota.
 - Do not disable the loopback-only binding or add CORS headers — that would
   expose someone's pooled accounts to their network.
 - Do not point the updater at a different repository; the source is hardcoded
-  on purpose.
+  on purpose. It is `makerxyz/claude-unlimited`, this fork: the upstream
+  (`DevDock-AI/claude-unlimited`) is no longer maintained and is never fetched.
 - Do not add background polling of a provider's API. The daemon makes exactly
   three kinds of request the user did not directly trigger, and no others: a
   daily update check against GitHub's public API, an OAuth **token refresh**

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${CLAUDE_UNLIMITED_REPO:-https://github.com/DevDock-AI/claude-unlimited.git}"
+REPO_URL="${CLAUDE_UNLIMITED_REPO:-https://github.com/makerxyz/claude-unlimited.git}"
 REPO_BRANCH="${CLAUDE_UNLIMITED_BRANCH:-main}"
 INSTALL_ROOT="$HOME/.local/share/claude-unlimited"
 BIN_DIR="$HOME/.local/bin"
@@ -150,8 +150,8 @@ echo
 if curl -fsS --max-time 2 "${URL}health" >/dev/null 2>&1; then
   echo "Dashboard: $URL"
   case "$(uname -s)" in
-    Darwin) open "$URL" >/dev/null 2>&1 || true ;;
-    Linux)  command -v xdg-open >/dev/null 2>&1 && (xdg-open "$URL" >/dev/null 2>&1 || true) ;;
+    Darwin) [ -n "${CLAUDE_UNLIMITED_NO_OPEN:-}" ] || open "$URL" >/dev/null 2>&1 || true ;;
+    Linux)  [ -n "${CLAUDE_UNLIMITED_NO_OPEN:-}" ] || { command -v xdg-open >/dev/null 2>&1 && (xdg-open "$URL" >/dev/null 2>&1 || true); } ;;
   esac
 else
   echo "The daemon did not come up. Start it yourself with:"
