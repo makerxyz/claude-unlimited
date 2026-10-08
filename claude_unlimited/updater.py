@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-GITHUB_OWNER = "DevDock-AI"
+GITHUB_OWNER = "makerxyz"
 GITHUB_REPO = "claude-unlimited"
 RELEASES_LATEST_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 COMMIT_REF_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{{ref}}"
@@ -79,12 +79,20 @@ class Release:
 
 def parse_version(raw: str) -> tuple:
     """(1, 2, 3) from "v1.2.3". Non-numeric trailing parts are dropped rather
-    than guessed at, so a pre-release tag compares as its base version."""
+    than guessed at, so a pre-release tag compares as its base version. The one
+    exception is this fork's own `+jack.N` suffix (see below)."""
     cleaned = raw.strip().lstrip("vV")
     parts = re.split(r"[.\-+]", cleaned)
     numbers = []
-    for part in parts:
+    for index, part in enumerate(parts):
         if not part.isdigit():
+            # This fork numbers its own releases "1.3.1+jack.2": the base
+            # version is upstream's, the trailing number is ours. It counts as
+            # one more component, so jack.2 is newer than jack.1 and both are
+            # newer than the bare 1.3.1 they were cut from, while any later
+            # base version (1.3.2) still outranks them.
+            if part == "jack" and numbers and index + 1 < len(parts) and parts[index + 1].isdigit():
+                numbers.append(int(parts[index + 1]))
             break
         numbers.append(int(part))
     return tuple(numbers) or (0,)

@@ -27,7 +27,7 @@ the session — the account underneath you changes and nothing else does. Often 
 dashboard's activity log is the only place you'll find out it happened.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/DevDock-AI/claude-unlimited/actions/workflows/ci.yml/badge.svg)](https://github.com/DevDock-AI/claude-unlimited/actions/workflows/ci.yml)
+[![CI](https://github.com/makerxyz/claude-unlimited/actions/workflows/ci.yml/badge.svg)](https://github.com/makerxyz/claude-unlimited/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Backend dependencies](https://img.shields.io/badge/backend%20dependencies-1-brightgreen)
@@ -182,6 +182,10 @@ This is the part worth being explicit about:
 
 ## Install
 
+> **This is the maintained fork** (`makerxyz/claude-unlimited`). The installer, `claude-unlimited update`
+> and the daily update check all read from it and never from the unmaintained upstream.
+> To upgrade a running install without cutting live sessions, use `scripts/upgrade-when-idle.sh`.
+
 Pick your system, copy the **one line**, paste, done. It installs everything it needs
 (even Python, if you don't have it), starts in the background, and opens the dashboard at
 **http://127.0.0.1:4317/** — where you add your first account.
@@ -189,19 +193,19 @@ Pick your system, copy the **one line**, paste, done. It installs everything it 
 **🍎 macOS & 🐧 Linux** — paste into a terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DevDock-AI/claude-unlimited/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/makerxyz/claude-unlimited/main/install.sh | bash
 ```
 
 **🪟 Windows** — press **Win + R** (or open **Command Prompt**), paste, press Enter:
 
 ```bat
-powershell -ExecutionPolicy Bypass -NoProfile -Command "irm https://raw.githubusercontent.com/DevDock-AI/claude-unlimited/main/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -NoProfile -Command "irm https://raw.githubusercontent.com/makerxyz/claude-unlimited/main/install.ps1 | iex"
 ```
 
 **🪟 Windows, already in PowerShell?** — paste this shorter version instead:
 
 ```powershell
-irm https://raw.githubusercontent.com/DevDock-AI/claude-unlimited/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/makerxyz/claude-unlimited/main/install.ps1 | iex
 ```
 
 Then run `claude-unlimited code` and you're routed. On Windows, run the installer from an
@@ -213,7 +217,7 @@ credentials are stored with Windows DPAPI instead of the Keychain.
 > every OS-specific piece (credential storage, the background service, the installer) is
 > implemented and covered by tests, and it *should* work fine — but it hasn't had the same
 > real-world mileage, so treat it as "should be fine, not guaranteed." If anything's off,
-> please [open an issue](https://github.com/DevDock-AI/claude-unlimited/issues).
+> please [open an issue](https://github.com/makerxyz/claude-unlimited/issues).
 
 Don't want it starting on login? Turn it off in **Settings → Daemon**, or run
 `claude-unlimited uninstall`. It keeps running either way until you stop it.
@@ -238,7 +242,7 @@ says so rather than pretending it succeeded.
 Prefer to read it first, or install from a checkout?
 
 ```bash
-git clone https://github.com/DevDock-AI/claude-unlimited.git
+git clone https://github.com/makerxyz/claude-unlimited.git
 cd claude-unlimited
 ./install.sh
 ```
