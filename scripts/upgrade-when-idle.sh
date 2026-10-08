@@ -68,7 +68,7 @@ EXPECT="$("$PY" -c 'import re,sys; print(re.search(r"__version__\s*=\s*\"([^\"]+
 log "building $(git log -1 --oneline) -> expect version $EXPECT"
 "$HERE/preflight-patches.sh" "$SRC" >/dev/null || { log "FAIL: preflight on source tree"; "$HERE/preflight-patches.sh" "$SRC" | grep -v '^  ok'; exit 1; }
 node --check claude_unlimited/static/app.js || { log "FAIL: node --check"; exit 1; }
-python3 -m pip install -q --no-deps --no-cache-dir --disable-pip-version-check --target "$W/site" "$SRC" ||
+"$PY" -m pip install -q --no-deps --no-cache-dir --disable-pip-version-check --target "$W/site" "$SRC" ||
   { log "FAIL: building the package"; exit 1; }
 "$HERE/preflight-patches.sh" "$W/site" >/dev/null || { log "FAIL: preflight on the BUILT package"; exit 1; }
 log "pre-flight passed on source and built package"
@@ -79,7 +79,7 @@ STAGE="$INSTALL_ROOT/stage-$TS"
 ROLL="$INSTALL_ROOT/rollback-$TS"
 mkdir -p "$STAGE" || exit 1
 cp -R "$SRC" "$STAGE/app" && rm -rf "$STAGE/app/.git" && find "$STAGE/app" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
-python3 -m venv "$STAGE/venv" || { log "FAIL: creating the staged venv"; rm -rf "$STAGE"; exit 1; }
+"$PY" -m venv "$STAGE/venv" || { log "FAIL: creating the staged venv"; rm -rf "$STAGE"; exit 1; }
 "$STAGE/venv/bin/pip" install -q --no-cache-dir --disable-pip-version-check "$STAGE/app" ||
   { log "FAIL: installing into the staged venv"; rm -rf "$STAGE"; exit 1; }
 # The venv was built at the staging path; its console scripts carry that path in their shebang.
@@ -89,7 +89,9 @@ SITE="$(ls -d "$STAGE"/venv/lib/python3*/site-packages | head -1)"
 "$HERE/preflight-patches.sh" "$SITE" >/dev/null || { log "FAIL: preflight on the staged venv"; rm -rf "$STAGE"; exit 1; }
 STAGED_VERSION="$("$STAGE/venv/bin/python" -c 'import claude_unlimited; print(claude_unlimited.__version__)')"
 [ "$STAGED_VERSION" = "$EXPECT" ] || { log "FAIL: staged venv imports $STAGED_VERSION, wanted $EXPECT"; rm -rf "$STAGE"; exit 1; }
-grep -q "^#!$INSTALL_ROOT/venv/bin/python" "$STAGE/venv/bin/claude-unlimited" || { log "FAIL: staged launcher shebang not relocated"; rm -rf "$STAGE"; exit 1; }
+# (pip writes either a plain shebang or an sh trampoline when the path is long; both name the interpreter)
+{ grep -qF "$INSTALL_ROOT/venv/bin/python" "$STAGE/venv/bin/claude-unlimited" && ! grep -rqF "$STAGE" "$STAGE/venv/bin"; } ||
+  { log "FAIL: staged launchers not relocated to the final venv path"; rm -rf "$STAGE"; exit 1; }
 log "staged $EXPECT ($SHA) at $STAGE: preflight and import ok"
 
 # ---- 3. optional: wait for an idle window ----------------------------------------------------
