@@ -356,6 +356,68 @@ def _speech_apply(body: bytes, stats: "eco.CompactionStats", level: str) -> tupl
     return encoded, stats
 
 
+def _is_claude_code_client(headers: dict) -> bool:
+    """True for Claude Code itself (CLI, SDK and the desktop app all send
+    `claude-cli/<version> (...)`), so a one-shot API client is never mistaken
+    for it."""
+    for key, value in (headers or {}).items():
+        if key.lower() == "user-agent":
+            return str(value).lower().startswith("claude-cli/")
+    return False
+
+
+def _is_anthropic_profile(profile: "Profile") -> bool:
+    if profile.kind == "oauth":
+        return True
+    if profile.kind != "api":
+        return False
+    base = (profile.base_url or "").strip().lower()
+    return not base or "://api.anthropic.com" in base
+
+
+def _upgrade_cache_ttl(body: bytes) -> bytes:
+    """Give every ttl-less `cache_control` block in a /v1/messages body a 1-hour ttl.
+
+    Claude Code only asks for the 1-hour prompt cache when it thinks it is on a
+    subscription login; behind this gateway it falls back to 5 minutes, which
+    lapses between turns and rewrites the whole context each time. Fails open:
+    a body that will not parse, or that sets ANY ttl itself (Anthropic requires
+    1h blocks to precede 5m ones, so mixing is not ours to reorder), goes out
+    exactly as it came in."""
+    if not body or b"cache_control" not in body:
+        return body
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return body
+    if not isinstance(parsed, dict):
+        return body
+
+    controls: list[dict] = []
+
+    def collect(node) -> None:
+        if isinstance(node, dict):
+            cc = node.get("cache_control")
+            if isinstance(cc, dict):
+                controls.append(cc)
+            for key in ("content", "tools", "system", "messages"):
+                child = node.get(key)
+                if isinstance(child, list):
+                    for item in child:
+                        collect(item)
+
+    collect(parsed)
+    if not controls or any("ttl" in cc for cc in controls):
+        return body
+    for cc in controls:
+        if cc.get("type") == "ephemeral":
+            cc["ttl"] = "1h"
+    try:
+        return json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (ValueError, TypeError):
+        return body
+
+
 def _drop_empty_text_blocks(body: bytes) -> bytes:
     """Remove empty text blocks from a request before it is forwarded.
 
@@ -1357,6 +1419,10 @@ class Gateway:
             # This endpoint already refused the requested model once: send the
             # Profile's default straight away rather than paying the same 404
             # and retry on every request.
+            if (getattr(pool.settings, "claude_code_cache_ttl_1h", True)
+                    and path.rstrip("/").endswith("/v1/messages")
+                    and _is_claude_code_client(headers) and _is_anthropic_profile(profile)):
+                eco_body = _upgrade_cache_ttl(eco_body)
             forced = _force_model_body(profile, eco_body)
             if forced is not None:
                 eco_body = forced
