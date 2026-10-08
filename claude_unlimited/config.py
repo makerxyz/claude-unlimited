@@ -178,6 +178,14 @@ class Settings:
     # would move live agents — so the return only ever happens on a pool that
     # has been idle long enough for that to cost nothing.
     return_to_preferred: bool = False
+    # Claude Code sends 5-minute cache_control blocks unless it believes it is on
+    # a subscription login, and behind this gateway it never does. A 5-minute
+    # prompt cache expires between turns of a normal session, so every full
+    # context (hundreds of thousands of tokens) is rewritten at the write price.
+    # While on, cache_control blocks with no ttl in Claude Code requests that go
+    # to Anthropic are upgraded to ttl "1h". Never touches a request that sets
+    # any ttl itself, and never non-Claude-Code clients. ON by default.
+    claude_code_cache_ttl_1h: bool = True
     # Global override for Profile.leave_on_fable_limit: while on, every Profile
     # behaves as if its own switch were on — an account whose Fable weekly
     # limit is spent hands the whole session to another account. While off,
@@ -299,6 +307,7 @@ def load_pool() -> Pool:
         # explicit true reads as off.
         codex_spend_credits=settings_data.get("codex_spend_credits") is True,
         return_to_preferred=bool(settings_data.get("return_to_preferred", False)),
+        claude_code_cache_ttl_1h=settings_data.get("claude_code_cache_ttl_1h") is not False,
         # Off by default and strict: only an explicit true turns it on. The
         # older pool-wide per-model-divert key is deliberately NOT read — it
         # meant something else (divert one model's requests, not move the
@@ -374,7 +383,7 @@ _SETTINGS_FIELDS = {
     "update_mode", "language", "notifications_enabled", "notify_update_available",
     "notify_approaching_threshold", "notify_rotated", "notify_quota_reset", "notify_needs_attention",
     "distribute_sessions_default", "keep_usage_fresh", "model_parity",
-    "eco_tier", "speech_level", "codex_spend_credits", "return_to_preferred",
+    "eco_tier", "speech_level", "codex_spend_credits", "return_to_preferred", "claude_code_cache_ttl_1h",
     "fable_limit_all_profiles", "context_1m",
 }
 
@@ -486,6 +495,8 @@ def validated_settings_changes(changes: dict) -> dict:
         raise ValueError("codex_spend_credits must be true or false")
     if "return_to_preferred" in changes and not isinstance(changes["return_to_preferred"], bool):
         raise ValueError("return_to_preferred must be true or false")
+    if "claude_code_cache_ttl_1h" in changes and not isinstance(changes["claude_code_cache_ttl_1h"], bool):
+        raise ValueError("claude_code_cache_ttl_1h must be true or false")
     if "fable_limit_all_profiles" in changes and not isinstance(changes["fable_limit_all_profiles"], bool):
         raise ValueError("fable_limit_all_profiles must be true or false")
     if "context_1m" in changes and changes["context_1m"] not in CONTEXT_1M_MODES:

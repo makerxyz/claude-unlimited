@@ -571,6 +571,9 @@ def _settings_files_pinning_routing() -> list:
     return conflicting
 
 
+DEFAULT_AUTOCOMPACT_WINDOW = "400000"
+
+
 def _status_line_args(port: int, claude_args: list[str]) -> list[str]:
     """`claude` arguments adding a status line that shows the Dashboard URL,
     so it stays visible for the whole session instead of scrolling away with
@@ -1569,6 +1572,12 @@ def code(port: int, claude_args: list[str], profile_arg: Optional[str] = None,
         return 1
 
     os.environ.update(_routing_env(port, token=token))
+    # Claude Code picks the 1-hour prompt cache by itself only on a subscription
+    # login; through this gateway it falls back to 5 minutes, which expires
+    # between turns and rewrites the whole context. Ask for 1h unless the caller
+    # chose otherwise.
+    os.environ.setdefault("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h")
+    os.environ.setdefault("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h")
     # Lets Claude Code fetch GET /v1/models from the pool. NOTE this alone does
     # NOT surface our parity labels: v2.1.263's picker treats discovery as an
     # availability filter over its OWN hard-coded model table and renders the
@@ -1595,7 +1604,12 @@ def code(port: int, claude_args: list[str], profile_arg: Optional[str] = None,
     # stdout's buffer (whenever stdout isn't a TTY) would vanish.
     sys.stdout.flush()
     sys.stderr.flush()
-    argv = ["claude", *_status_line_args(port, claude_args), *claude_args]
+    # Auto-compact well before the upstream context cap: a 700k+ context rewritten
+    # on every cache miss is the single largest cost. Overridable with --autocompact.
+    compact_arg = [] if (os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+                         or any(a == "--autocompact" or a.startswith("--autocompact=")
+                                for a in claude_args)) else ["--autocompact", DEFAULT_AUTOCOMPACT_WINDOW]
+    argv = ["claude", *_status_line_args(port, claude_args), *compact_arg, *claude_args]
     if os.name == "nt":
         # Windows has no real exec: os.execvp spawns a child and exits the
         # parent, so the shell regains the console while claude's TUI is still
