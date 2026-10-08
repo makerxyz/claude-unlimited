@@ -358,6 +358,7 @@ def _profile_to_public_dict(p, runtime=None, usage=None, in_use_now=False) -> di
         # folded in here: the card shows what this Profile has set.
         "leave_on_fable_limit": getattr(p, "leave_on_fable_limit", False),
         "state": state_value,
+        "budget_unavailable": bool(runtime is not None and runtime.budget_unavailable),
         "status_word": _STATUS_WORDS.get(state_value, state_value),
         "usage_5h_percent": runtime.last_usage_percent if runtime is not None else None,
         "usage_5h_resets_at": runtime.resets_at.isoformat() if runtime is not None and runtime.resets_at else None,
@@ -553,6 +554,46 @@ def _discard_result(result) -> None:
             close()
         except Exception:  # noqa: BLE001 - cleanup must not raise
             pass
+
+
+def _local_models_list() -> dict:
+    """OpenAI-format model list served at GET /v1/models.
+
+    Anthropic's API has no such endpoint, so proxying it upstream 404s —
+    and clients that probe it (Claude Desktop's third-party provider
+    setup, Claude Code's /model picker) treat the gateway as broken. The
+    model catalogue is the source of truth; the literals are a last
+    resort so the endpoint still answers before initialize() has run.
+    """
+    ids: list = []
+    try:
+        catalogue = model_catalogue.current()
+        if catalogue is not None:
+            ids = [m.id for m in catalogue.anthropic]
+    except Exception:  # noqa: BLE001 - never break model discovery
+        ids = []
+    if not ids:
+        ids = ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1",
+               "claude-sonnet-5", "claude-haiku-4-5"]
+    # Desktop folds bare + [1m] IDs into one model with a 1M variant.
+    # These are client context selections; Claude Code strips the suffix
+    # before sending the provider model ID. Preserve every discovered ID.
+    supports_1m = {
+        "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+        "claude-opus-5", "claude-opus-5-5", "claude-sonnet-4-6",
+        "claude-sonnet-5", "claude-sonnet-5-5", "claude-fable-5",
+        "claude-fable-5-1",
+    }
+    ids = list(dict.fromkeys(ids))
+    ids += [mid + "[1m]" for mid in list(ids)
+            if mid in supports_1m and mid + "[1m]" not in ids]
+    return {
+        "object": "list",
+        "data": [
+            {"id": mid, "object": "model", "created": 0, "owned_by": "anthropic"}
+            for mid in ids
+        ],
+    }
 
 
 class _DashboardHandler(BaseHTTPRequestHandler):
@@ -1002,6 +1043,14 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             body = json.dumps({"events": [asdict(e) for e in events]}, indent=2).encode("utf-8")
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             self._send_raw_json(200, body, download_name=f"claude-unlimited-activity-{stamp}.json")
+            return
+
+        if path.rstrip("/") == "/v1/models":
+            # Anthropic has no /v1/models endpoint, so the proxy fallthrough
+            # below would 404 it — and Claude Desktop's third-party provider
+            # setup treats that as a broken gateway. Answer locally from the
+            # model catalogue in OpenAI list format instead.
+            self._send_json(200, _local_models_list())
             return
 
         # Anything left that isn't a Dashboard or static route is an

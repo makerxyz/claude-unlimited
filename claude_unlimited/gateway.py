@@ -32,9 +32,9 @@ from urllib.parse import urlparse
 from . import activity, eco, gpt_windows, speech, connectors, notifications, oauth_credential, oauth_login, openai_bridge, openai_credential, openai_models, openai_observation, openai_translate, project_attribution, project_usage, runtime_state, secret_store, usage_history, usage_probe, usage_tracking
 from . import profiles as profile_repo
 from .config import Pool, Profile, load_pool
-from .observation import AuthInvalid, ModelWindow, ProviderUnavailable, QuotaExhausted, ShortRateLimit, Unknown, UsageSnapshot, classify
+from .observation import AuthInvalid, BudgetUnavailable, ModelWindow, ProviderUnavailable, QuotaExhausted, ShortRateLimit, Unknown, UsageSnapshot, classify
 from .proxy import (REQUEST_TOO_LARGE_STATUS, RequestTooLarge, build_upstream_request, check_request_size,
-                    filter_response_headers, request_model, rewrite_model)
+                    filter_response_headers, request_model, rewrite_model, retry_without_rejected_thinking)
 from .router import (
     PoolSnapshot,
     ProfileRuntime,
@@ -53,7 +53,7 @@ from .router import (
 from .upstream import UpstreamResponse
 from .upstream import send as real_send
 
-MAX_ROTATION_ATTEMPTS = 4  # bounded — never loop the whole pool forever on a bad run
+MAX_ROTATION_ATTEMPTS = 4  # minimum bound; larger configured pools get one pass
 
 # How long an idle branch keeps its account pin. A pin is only a routing
 # preference, so outliving Anthropic's prompt cache costs nothing; expiring too
@@ -572,6 +572,7 @@ def _restorable_state_fields(persisted: Optional[dict], now: datetime) -> dict:
         if deadline is not None and deadline > now:
             fields["state"] = ProfileState.COOLDOWN
             fields["cooldown_until"] = deadline
+            fields["budget_unavailable"] = persisted.get("budget_unavailable") is True
     return fields
 
 
@@ -953,6 +954,7 @@ class Gateway:
         # _RATE_LIMIT_BACKOFF_SECONDS). See that method's own docstring for
         # what it's actually for.
         self._refresh_check_not_before: dict[str, float] = {}
+        self._credential_check_not_before: dict[str, float] = {}
         # Consecutive rate-limited refreshes per Profile, driving the
         # escalating backoff and the give-up threshold above.
         self._refresh_rate_limited_streak: dict[str, int] = {}
@@ -1056,6 +1058,7 @@ class Gateway:
                     # than waiting out a window earned by the old token.
                     self._refresh_rate_limited_streak.pop(p.id, None)
                     self._refresh_check_not_before.pop(p.id, None)
+                    self._credential_check_not_before.pop(p.id, None)
                 if not p.enabled:
                     new_state = ProfileState.DISABLED
                 elif rt.state == ProfileState.DISABLED and p.enabled:
@@ -1137,6 +1140,7 @@ class Gateway:
                     # exists to catch, found here by inspection rather than by
                     # a second live incident.
                     consecutive_unretryable_failures=rt.consecutive_unretryable_failures,
+                    budget_unavailable=rt.budget_unavailable,
                     # Same rebuild trap as model_usage above: credits are
                     # observed, not configured, so leaving them out would
                     # blank the balance on the next Dashboard poll.
@@ -1203,6 +1207,7 @@ class Gateway:
         avoiding."""
         now = datetime.now(timezone.utc)
         attempted: set[str] = set()
+        thinking_repair_attempted = False
         previous_profile_id = self._current_profile_id
         is_subagent = project_attribution.is_subagent(headers)
         # Which conversation branch is this? None for anything that isn't
@@ -1243,7 +1248,7 @@ class Gateway:
         eco_body: Optional[bytes] = None
         eco_stats = eco.CompactionStats()
 
-        for _ in range(MAX_ROTATION_ATTEMPTS):
+        for _ in range(max(MAX_ROTATION_ATTEMPTS, len(pool_now.profiles))):
             # The Profile a pinned request is held to: the pin itself, or —
             # for a subagent — the "Forced in subagents" Profile.
             held_to = forced_profile_id
@@ -1253,7 +1258,8 @@ class Gateway:
                 pre_recovery_states = {rt.profile_id: rt.state for rt in snapshot.profiles}
                 snapshot = recover_expired_cooldowns(snapshot, now)
                 self._runtime = {rt.profile_id: rt for rt in snapshot.profiles}
-                snapshot = self._maybe_return_to_preferred(pool, snapshot)
+                if forced_profile_id is None:
+                    snapshot = self._maybe_return_to_preferred(pool, snapshot, now, fit)
                 if forced_profile_id is not None:
                     # An explicit --profile pin outranks everything: it must
                     # never be silently substituted, not even by a branch pin.
@@ -1305,8 +1311,21 @@ class Gateway:
                     activity.record("error", "Pinned Profile unavailable — request rejected",
                                      meta=f"{held_to}: {decision.reason}, "
                                           f"client={_client_label(headers)}")
+                    budget_blocked = self._runtime.get(held_to)
+                    if budget_blocked is not None and budget_blocked.budget_unavailable:
+                        return GatewayResult(status=402, headers={}, body_chunks=None, profile_id=held_to,
+                                             error="provider_budget_unavailable",
+                                             error_detail="Pinned provider requires funding (HTTP 402).")
                     return GatewayResult(status=503, headers={}, body_chunks=None, profile_id=None,
                                           error=decision.reason)
+                budget_blocked = [rt for rt in snapshot.profiles
+                                  if rt.budget_unavailable and rt.state == ProfileState.COOLDOWN
+                                  and (rt.automatic or rt.profile_id == snapshot.current_profile_id)
+                                  and fits(rt, fit)]
+                if budget_blocked:
+                    return GatewayResult(status=402, headers={}, body_chunks=None, profile_id=None,
+                                         error="provider_budget_unavailable",
+                                         error_detail="Configured fallback provider requires funding (HTTP 402); no eligible Profile is available.")
                 exhausted, resets_at = _capacity_exhaustion(snapshot, pool)
                 # Said ONCE per outage, not once per request: a client that
                 # retries in a loop used to write an Activity line and raise a
@@ -1505,6 +1524,55 @@ class Gateway:
 
             observation = classify(resp.status, filter_response_headers(resp.headers), now)
 
+            signature_target = urlparse(upstream_req.url) if resp.status == 400 else None
+            if (resp.status == 400 and not thinking_repair_attempted
+                    and upstream_req.method == "POST" and signature_target.scheme == "https"
+                    and signature_target.hostname == "api.anthropic.com"
+                    and signature_target.path.rstrip("/") == "/v1/messages"):
+                # Only a provider-confirmed historical signature rejection can
+                # rewrite signed history. Success streams remain untouched and
+                # a repair never mutates the caller's stored conversation.
+                try:
+                    signature_error, resp = _peek_error_body(resp)
+                except (OSError, http.client.HTTPException):
+                    # A partial error body cannot be relayed as a complete400.
+                    # Release the slot and use the existing upstream-failure
+                    # policy before any response bytes reach the caller.
+                    resp.connection.close()
+                    with self._lock:
+                        self._mark_profile_idle(profile.id)
+                        self._observe(profile.id, ProviderUnavailable(retry_after_seconds=None), now)
+                    if forced_profile_id is not None:
+                        activity.record("error", f"{profile.name} — could not reach upstream",
+                                        meta="pinned profile, error body disconnected")
+                        return GatewayResult(status=503, headers={}, body_chunks=None, profile_id=None,
+                                             error="upstream_unreachable")
+                    activity.record("error", f"{profile.name} — could not reach upstream",
+                                    meta="error body disconnected, rotating to next eligible profile")
+                    continue
+                repaired_req = retry_without_rejected_thinking(upstream_req, resp.status, signature_error)
+                if repaired_req is not None:
+                    thinking_repair_attempted = True
+                    try:
+                        repaired_resp = self._transport(repaired_req)
+                    except (OSError, http.client.HTTPException):
+                        # The peek completed and restored the original body.
+                        # Preserve that actual400 if the one repair send fails.
+                        pass
+                    else:
+                        resp.connection.close()
+                        resp = repaired_resp
+                        # Carry only repaired history, not the first profile's
+                        # injected account UUID/effort. Subsequent profiles
+                        # rebuild their own request metadata and auth headers.
+                        repaired_history = json.loads(repaired_req.body)["messages"]
+                        canonical_body = json.loads(eco_body)
+                        canonical_body["messages"] = repaired_history
+                        eco_body = json.dumps(canonical_body).encode("utf-8")
+                        observation = classify(resp.status, filter_response_headers(resp.headers), now)
+                        activity.record("session", "Retried rejected historical thinking signature",
+                                        meta="one request-only repair; active tool turn preserved")
+
             if (profile.kind == "api" and profile.default_model
                     and isinstance(observation, Unknown) and observation.status_code in _MODEL_FALLBACK_STATUS_CODES):
                 # Read the (small) error body to tell "model not found" from
@@ -1564,6 +1632,15 @@ class Gateway:
                         f"({observation.percent:.0f}% / {new_rt.switch_threshold:.0f}%).", pool.settings)
                 elif not near_threshold:
                     self._warned_approaching.discard(profile.id)
+
+            if isinstance(observation, BudgetUnavailable):
+                activity.record("error", f"{profile.name} — provider requires funding (HTTP 402)",
+                                meta="billing cooldown for one hour")
+                if forced_profile_id is None:
+                    with self._lock:
+                        self._mark_profile_idle(profile.id)
+                    resp.connection.close()
+                    continue
 
             if isinstance(observation, QuotaExhausted):
                 if forced_profile_id is not None:
@@ -1627,6 +1704,18 @@ class Gateway:
             return GatewayResult(status=resp.status, headers=resp.headers, body_chunks=body_chunks,
                                   profile_id=profile.id)
 
+        with self._lock:
+            budget_blocked = any(
+                rt.budget_unavailable and rt.state == ProfileState.COOLDOWN
+                and (rt.automatic or rt.profile_id == self._current_profile_id)
+                and fits(rt, fit)
+                for rt in self._runtime.values()
+                if pool.get(rt.profile_id) is not None and pool.get(rt.profile_id).enabled
+            )
+        if budget_blocked:
+            return GatewayResult(status=402, headers={}, body_chunks=None, profile_id=None,
+                                 error="provider_budget_unavailable",
+                                 error_detail="Configured fallback provider requires funding (HTTP 402); no eligible Profile is available.")
         activity.record("error", "Rotation attempts exhausted without a usable Profile")
         notifications.notify_if_enabled("needs_attention", "Claude Unlimited",
                                           "Rotation attempts exhausted — no usable Profile was found.", pool.settings)
@@ -1671,6 +1760,18 @@ class Gateway:
             # the network call but not the subprocess, which is exactly what
             # this field's own docstring says must not happen.
             return None
+        if rt.state != ProfileState.AUTH_INVALID:
+            # A rejected Profile is already paced by _refresh_attempt_due above
+            # (and its own re-auth recovery cooldown); it must be free to
+            # notice a repaired credential. Everything else — healthy,
+            # no refresh token, unreadable — is throttled here, claimed
+            # before reading so a failed read counts too, without consuming
+            # the refresh slot.
+            with self._refresh_lock:
+                check_now = time.monotonic()
+                if check_now < self._credential_check_not_before.get(p.id, 0):
+                    return None
+                self._credential_check_not_before[p.id] = check_now + self._REFRESH_CHECK_COOLDOWN_SECONDS
         try:
             stored = secret_store.get_token(p.id)
         except Exception:
@@ -2341,6 +2442,8 @@ class Gateway:
         if not profile.enabled:
             return RoutingDecision(profile_id=None, reason="forced_profile_disabled")
         rt = self._runtime.get(forced_profile_id)
+        if rt is not None and rt.budget_unavailable:
+            return RoutingDecision(profile_id=None, reason="provider_budget_unavailable")
         if rt is not None and rt.state == ProfileState.AUTH_INVALID:
             return RoutingDecision(profile_id=None, reason="forced_profile_needs_reauth")
         if rt is not None and not fits(rt, fit):
@@ -2454,6 +2557,7 @@ class Gateway:
                     # for which states survive and which are re-derived.
                     "state": rt.state.value if hasattr(rt.state, "value") else str(rt.state),
                     "cooldown_until": rt.cooldown_until.isoformat() if rt.cooldown_until else None,
+                    "budget_unavailable": rt.budget_unavailable,
                     # See _restore_refresh_backoff: keeps a rate-limited account
                     # from re-poking the token endpoint the moment the daemon
                     # restarts.
@@ -2624,13 +2728,17 @@ class Gateway:
     # place, so the return must cost a session nothing.
     _RETURN_TO_PREFERRED_IDLE_SECONDS = 600.0  # 10 minutes
 
-    def _maybe_return_to_preferred(self, pool: Pool, snapshot: PoolSnapshot) -> PoolSnapshot:
+    def _maybe_return_to_preferred(self, pool: Pool, snapshot: PoolSnapshot,
+                                   now: Optional[datetime] = None,
+                                   fit: Optional[RequestFit] = None) -> PoolSnapshot:
         """Issue #4: after a failover the pool stays on the fallback for as
         long as it works, even once the preferred account's window has reset,
         because choose() is sticky while the current Profile is ELIGIBLE. That
         stickiness is deliberate — it protects the prompt cache and, with
         branch pinning, keeps live agents where they are — so the return is
-        opt-in, off by default, and only ever happens on an idle pool.
+        opt-in and off by default. Subscription-to-subscription moves wait
+        for an idle pool; a paid API fallback returns to an available
+        subscription at a new request boundary without disturbing streams.
 
         Caller holds self._lock. Returns the snapshot to route on; the only
         thing it ever changes is the rotation POINTER, which choose() then
@@ -2648,7 +2756,8 @@ class Gateway:
             return snapshot
         current = next((rt for rt in snapshot.profiles if rt.profile_id == current_id), None)
         candidates = [rt for rt in snapshot.profiles
-                      if rt.state == ProfileState.ELIGIBLE and rt.automatic]
+                      if rt.state == ProfileState.ELIGIBLE and rt.automatic
+                      and fits(rt, fit) and not must_leave(rt, now or datetime.now(timezone.utc))]
         if not candidates:
             return snapshot
         preferred = min(candidates, key=lambda rt: rt.priority)
@@ -2661,13 +2770,18 @@ class Gateway:
         # to.
         if current is not None and preferred.priority >= current.priority:
             return snapshot
+        current_profile = pool.get(current_id)
+        preferred_profile = pool.get(preferred.profile_id)
+        subscription_return = (current_profile is not None and current_profile.kind == "api"
+                               and preferred_profile is not None and preferred_profile.kind == "oauth")
         idle_for = self._seconds_since_last_activity_locked()
-        if idle_for is not None and idle_for < self._RETURN_TO_PREFERRED_IDLE_SECONDS:
+        if not subscription_return and idle_for is not None and idle_for < self._RETURN_TO_PREFERRED_IDLE_SECONDS:
             return snapshot
         self._current_profile_id = None
         name = self._profile_name(pool, preferred.profile_id)
         activity.record("rotation", f"returning to {name}",
-                         meta="higher-priority account is available again and the pool is idle")
+                         meta=("subscription available again — routing new requests" if subscription_return
+                               else "higher-priority account is available again and the pool is idle"))
         return PoolSnapshot(profiles=snapshot.profiles, current_profile_id=None)
 
     def _manual_choice(self, pool: Pool, snapshot: PoolSnapshot, now: datetime,
