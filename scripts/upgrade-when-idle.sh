@@ -138,6 +138,9 @@ rollback() {
 }
 
 # ---- 5. swap and restart, in one step --------------------------------------------------------
+# Leave the checkout: a daemon started from here (the `start` fallback inside install, or a
+# rollback) would otherwise import this directory's claude_unlimited ahead of the installed one.
+cd / || exit 1
 hud_carry_over
 mkdir -p "$ROLL"
 t_swap=$(date +%s)
