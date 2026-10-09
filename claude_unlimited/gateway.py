@@ -870,6 +870,9 @@ class Gateway:
         # once — e.g. two concurrent `claude-unlimited code --profile`
         # terminals pinned to different Profiles.
         self._in_flight: set[str] = set()
+        # Several branches can stream from one Profile at once. A completion
+        # must release only its own slot, never make the remaining calls idle.
+        self._in_flight_counts: dict[str, int] = {}
         # Per-branch account pins: {(lineage_session_id, agent_id): BranchPin}.
         # A "branch" is one conversation thread — a session's main agent, or
         # one of its subagents (project_attribution.branch_key). Pinning keeps
@@ -889,10 +892,10 @@ class Gateway:
         # request that never drains — a client that abandons the stream, or an
         # upstream connection that hangs open — would otherwise leave its
         # Profile in _in_flight forever, pinning "Used now" and wedging the
-        # idle check (both symptoms actually observed: a Profile stuck "Used
-        # now" 20+ minutes after its last request, long past the grace window).
-        # in_flight_ids() ignores an entry older than _IN_FLIGHT_MAX_SECONDS so
-        # such a slot self-heals; no legitimate single request runs that long.
+        # display (a Profile stuck "Used now" 20+ minutes after its last
+        # request was observed). in_flight_ids() caps that display age, but
+        # the disruptive-update idle signal must retain explicitly counted
+        # calls: age alone cannot prove a long or stalled stream has ended.
         # "Take over" — held until another Take Over or until the Profile
         # stops being ELIGIBLE (see _manual_choice).
         self._manual_profile_id: Optional[str] = None
@@ -1473,8 +1476,7 @@ class Gateway:
             # Profile at once (concurrent `claude-unlimited code --profile`
             # sessions each pinned to a different one).
             with self._lock:
-                self._in_flight.add(profile.id)
-                self._in_flight_since.setdefault(profile.id, time.monotonic())
+                self._mark_profile_busy(profile.id)
 
             try:
                 resp: UpstreamResponse = self._transport(upstream_req)
@@ -1886,8 +1888,7 @@ class Gateway:
             return self._codex_non_messages_response(profile, path, body)
 
         with self._lock:
-            self._in_flight.add(profile.id)
-            self._in_flight_since.setdefault(profile.id, time.monotonic())
+            self._mark_profile_busy(profile.id)
 
         try:
             branch = project_attribution.branch_key(headers, body)
@@ -3001,17 +3002,29 @@ class Gateway:
                 for key, pin in self._branch_pins.items() if pin.last_touch > cutoff
             ]
 
+    def _mark_profile_busy(self, profile_id: str) -> None:
+        """Start one request; the caller holds self._lock."""
+        self._in_flight_counts[profile_id] = self._in_flight_counts.get(profile_id, 0) + 1
+        self._in_flight.add(profile_id)
+        self._in_flight_since.setdefault(profile_id, time.monotonic())
+
     def _mark_profile_idle(self, profile_id: str) -> None:
-        """Moves a Profile out of `_in_flight` and starts its "Used now"
-        grace period — call with `self._lock` held. Centralized so every
+        """Releases one request and starts its "Used now" grace period;
+        other requests on this Profile remain busy. Call with self._lock held.
+        Centralized so every
         exit path (forced-return, rotate-and-continue, or a fully-drained
         response) records the same last-active timestamp; a call site that
         only did `self._in_flight.discard(...)` would make that Profile's
         "Used now" pill vanish instantly instead of fading out like the
         others."""
+        self._last_active[profile_id] = time.monotonic()
+        remaining = self._in_flight_counts.get(profile_id, 1) - 1
+        if remaining > 0:
+            self._in_flight_counts[profile_id] = remaining
+            return
+        self._in_flight_counts.pop(profile_id, None)
         self._in_flight.discard(profile_id)
         self._in_flight_since.pop(profile_id, None)
-        self._last_active[profile_id] = time.monotonic()
 
     def _wrap_with_in_flight_clear(self, chunks, profile_id: str):
         """Clears profile_id from self._in_flight once its response is
@@ -3045,9 +3058,11 @@ class Gateway:
         hold self._lock — it is a plain Lock, not an RLock, so re-entering it
         from inside the routing critical section would deadlock."""
         now = time.monotonic()
-        # A slot older than the cap is a leaked/hung request, not live use;
-        # ignore it here too so it can't wedge is_idle (and the updater)
-        # forever — the same bound in_flight_ids() applies.
+        # Never age an explicitly tracked request into an idle signal. A
+        # long stream or an unknown/hung call is unsafe to interrupt during
+        # an automatic upgrade, even after the Dashboard's display cap.
+        if self._in_flight_counts:
+            return 0.0
         if any(now - self._in_flight_since.get(pid, now) < self._IN_FLIGHT_MAX_SECONDS
                for pid in self._in_flight):
             return 0.0
@@ -3071,12 +3086,13 @@ class Gateway:
         within _USED_NOW_GRACE_SECONDS, because the Dashboard's "Used now"
         light must not flicker between polls. That grace makes it useless as
         an "is the pool busy" signal for a script (issue #3), so this is the
-        unsmoothed view: live slots only, still bounded by
-        _IN_FLIGHT_MAX_SECONDS so a leaked slot cannot pin it forever."""
+        unsmoothed view. Explicitly tracked calls stay busy until they end;
+        age alone cannot prove they are safe to interrupt."""
         now = time.monotonic()
         with self._lock:
             return {pid for pid in self._in_flight
-                    if now - self._in_flight_since.get(pid, now) < self._IN_FLIGHT_MAX_SECONDS}
+                    if self._in_flight_counts.get(pid, 0) > 0
+                    or now - self._in_flight_since.get(pid, now) < self._IN_FLIGHT_MAX_SECONDS}
 
     def in_flight_ids(self) -> set[str]:
         """Profile ids to show as "Used now" — either a request is

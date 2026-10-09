@@ -45,7 +45,9 @@ def install(port: int) -> None:
         "ProgramArguments": [sys.executable, "-m", "claude_unlimited", "start", "--port", str(port)],
         "RunAtLoad": True,
         "KeepAlive": True,
-        "ProcessType": "Background",
+        # The gateway serves interactive inference and dashboard requests.
+        # Background scheduling can starve even health checks on a busy host.
+        "ProcessType": "Interactive",
         # Without this, stdout is block-buffered and daemon.out.log lags a
         # whole run — the log is only useful if it is written as it happens.
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
