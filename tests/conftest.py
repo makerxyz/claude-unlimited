@@ -20,6 +20,18 @@ def no_real_desktop_notifications(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def runtime_state_writes_through(monkeypatch):
+    """runtime_state.save() is rate-limited in production (one write per 5 s).
+    Tests that persist and then read the file expect the write to land at
+    once, and module-level coalescing state must not leak between tests.
+    test_runtime_state_coalescing.py sets its own interval to exercise it."""
+    import claude_unlimited.runtime_state as runtime_state
+    monkeypatch.setattr(runtime_state, "MIN_WRITE_INTERVAL_S", 0.0)
+    for name in ("_last_written", "_last_write_at", "_pending", "_timer"):
+        monkeypatch.setattr(runtime_state, name, None)
+
+
+@pytest.fixture(autouse=True)
 def no_real_user_config(monkeypatch, tmp_path):
     """The test suite must never read the user's real ~/.claude-unlimited.
 
