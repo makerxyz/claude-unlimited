@@ -54,6 +54,7 @@ def test_install_writes_plist_and_bootstraps(isolated_paths, monkeypatch):
     assert plist["Label"] == launchd.LABEL
     assert plist["ProgramArguments"][-2:] == ["--port", "4317"]
     assert plist["RunAtLoad"] is True
+    assert plist["ProcessType"] == "Interactive"
 
 
 def test_install_raises_on_bootstrap_failure(isolated_paths, monkeypatch):
@@ -146,3 +147,4 @@ def test_reinstall_with_different_port_updates_plist(isolated_paths, monkeypatch
 
     plist = plistlib.loads(launchd.PLIST_PATH.read_bytes())
     assert plist["ProgramArguments"][-2:] == ["--port", "5000"]
+    assert plist["ProcessType"] == "Interactive"

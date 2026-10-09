@@ -95,6 +95,47 @@ def test_proxy_request_with_wrong_placeholder_token_is_401(running_proxy_server)
         assert e.code == 401
 
 
+def test_blocked_upstreams_do_not_block_health_or_models(running_proxy_server):
+    """Several stalled fake inference calls must leave local control paths usable."""
+    from concurrent.futures import ThreadPoolExecutor
+    release = threading.Event()
+    entered = threading.Event()
+    lock = threading.Lock()
+    started = 0
+
+    def transport(req):
+        nonlocal started
+        with lock:
+            started += 1
+            if started == 4:
+                entered.set()
+        assert release.wait(10)
+        return fake_response(200)
+
+    daemon._gateway._transport = transport
+    token = placeholder_token.get_or_create()
+
+    def call():
+        request = urllib.request.Request(f"{running_proxy_server}/v1/messages", data=b"{}",
+                                         headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read()
+
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        requests = [workers.submit(call) for _ in range(4)]
+        try:
+            assert entered.wait(5)
+            for path in ("/health", "/v1/models"):
+                with urllib.request.urlopen(running_proxy_server + path, timeout=2) as response:
+                    assert response.status == 200
+                    response.read()
+            assert daemon._gateway.serving_now_ids() == {"a"}
+        finally:
+            release.set()
+        assert all(f.result(timeout=5)[0] == 200 for f in requests)
+    assert daemon._gateway.serving_now_ids() == set()
+
+
 def test_the_capacity_guards_400_reaches_the_client_in_anthropics_exact_shape(monkeypatch, tmp_path):
     """docs/adr/0009: Claude Code's reactive compaction keys on this envelope
     and this wording — invalid_request_error, "prompt is too long: N tokens >
