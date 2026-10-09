@@ -50,6 +50,7 @@ from . import context_window
 from . import daemon_installer
 from . import export_import
 from . import hud
+from . import runtime_state
 from . import i18n
 from . import model_catalogue
 from . import notifications
@@ -2256,11 +2257,15 @@ def run_foreground(host: str = LOOPBACK_HOST, port: int = DEFAULT_PORT) -> None:
         PID_FILE.write_text(str(os.getpid()))
     except OSError:
         pass
+    # runtime_state.save() coalesces writes; make sure the last change reaches
+    # disk on SIGTERM (launchd stop / self-restart) and on a normal exit.
+    runtime_state.install_shutdown_flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        runtime_state.flush()
         server.server_close()
         # Closes the store's connection, which truncates the write-ahead log.
         # Left open across a restart, that log is what the next start has to
