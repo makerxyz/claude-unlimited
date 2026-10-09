@@ -36,6 +36,29 @@ def fake_response(status, headers=None, body=b"ok"):
     return UpstreamResponse(status=status, headers=headers or {}, body_chunks=chunks(), connection=FakeConnection())
 
 
+def test_one_completed_request_does_not_hide_another_on_the_same_profile(pool_env):
+    save_pool(Pool(profiles=[Profile(id="a", name="A", kind="oauth", automatic=True, enabled=True)]))
+    gw = Gateway(transport=lambda req: fake_response(200))
+    first = gw.handle("POST", "/v1/messages", {}, b"{}")
+    second = gw.handle("POST", "/v1/messages", {}, b"{}")
+    list(first.body_chunks)
+    assert gw.serving_now_ids() == {"a"}
+    assert not gw.is_idle(10)
+    list(second.body_chunks)
+    assert gw.serving_now_ids() == set()
+
+
+def test_an_open_response_is_busy_even_past_the_dashboard_stale_cap(pool_env):
+    save_pool(Pool(profiles=[Profile(id="a", name="A", kind="oauth", automatic=True, enabled=True)]))
+    gw = Gateway(transport=lambda req: fake_response(200))
+    result = gw.handle("POST", "/v1/messages", {}, b"{}")
+    gw._in_flight_since["a"] = real_time.monotonic() - gw._IN_FLIGHT_MAX_SECONDS - 1
+    assert gw.serving_now_ids() == {"a"}
+    assert not gw.is_idle(10)
+    list(result.body_chunks)
+    assert gw.serving_now_ids() == set()
+
+
 @pytest.fixture
 def pool_env(monkeypatch, tmp_path):
     monkeypatch.setattr("claude_unlimited.config.APP_DIR", tmp_path)

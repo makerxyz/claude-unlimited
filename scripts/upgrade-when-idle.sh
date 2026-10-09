@@ -9,9 +9,10 @@
 # app/ and venv/ next to the live ones. Then, in one step, the live pair is renamed aside,
 # the staged pair renamed into place and the daemon restarted through `claude-unlimited
 # install`; health is checked at once and a failure renames the old pair back and restarts
-# on it. By default it does NOT wait for the gateway to go quiet. Set CU_IDLE_MAX_WAIT=<s>
-# to have it wait up to that long for a window with nothing in flight (idle_seconds >=
-# CU_IDLE_SECONDS) before the swap; it proceeds anyway when the cap is reached.
+# on it. By default it waits up to 20 minutes for a positively confirmed idle window.
+# A busy, timed-out or malformed status never means idle. At the cap it aborts
+# without swapping the live install. CU_FORCE_RESTART=1 explicitly bypasses that
+# guard for an outage repair; it can interrupt requests which already used quota.
 #
 # Launch it DETACHED so it survives the request that started it being cut:
 #   python3 -c 'import subprocess;subprocess.Popen(["scripts/upgrade-when-idle.sh"],
@@ -20,7 +21,8 @@
 # Log: ~/.local/state/claude-unlimited-upgrade.log (never contains a credential).
 #
 # Environment: CLAUDE_UNLIMITED_REPO (default: this fork), CLAUDE_UNLIMITED_PORT (4317),
-# CU_IDLE_SECONDS (10), CU_IDLE_MAX_WAIT (0 = do not wait; e.g. 1200 for 20 min),
+# CU_IDLE_SECONDS (10), CU_IDLE_MAX_WAIT (1200; 0 = one check),
+# CU_FORCE_RESTART (0; 1 = explicitly accept interrupting active requests),
 # CU_SRC (use this clean checkout instead of cloning).
 set -uo pipefail
 
@@ -28,7 +30,7 @@ REPO="${CLAUDE_UNLIMITED_REPO:-https://github.com/makerxyz/claude-unlimited.git}
 REF="${1:-main}"
 PORT="${CLAUDE_UNLIMITED_PORT:-4317}"
 IDLE_SECONDS="${CU_IDLE_SECONDS:-10}"
-MAX_WAIT="${CU_IDLE_MAX_WAIT:-0}"
+MAX_WAIT="${CU_IDLE_MAX_WAIT:-1200}"
 BASE="http://127.0.0.1:${PORT}"
 INSTALL_ROOT="$HOME/.local/share/claude-unlimited"
 BIN_DIR="$HOME/.local/bin"
@@ -42,10 +44,6 @@ export CLAUDE_UNLIMITED_NO_OPEN=1          # an unattended upgrade must not open
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 PY="$INSTALL_ROOT/venv/bin/python"; [ -x "$PY" ] || PY="python3"
 
-status_field() { # field -> value from /api/status ("" if unreachable); never prints the csrf token
-  curl -fsS --max-time 3 "$BASE/api/status" 2>/dev/null |
-    "$PY" -c 'import sys,json; d=json.load(sys.stdin); v=d.get(sys.argv[1]); print("" if v is None else v)' "$1" 2>/dev/null
-}
 health_version() {
   curl -fsS --max-time 3 "$BASE/health" 2>/dev/null |
     "$PY" -c 'import sys,json; print(json.load(sys.stdin).get("version",""))' 2>/dev/null
@@ -94,20 +92,26 @@ STAGED_VERSION="$("$STAGE/venv/bin/python" -c 'import claude_unlimited; print(cl
   { log "FAIL: staged launchers not relocated to the final venv path"; rm -rf "$STAGE"; exit 1; }
 log "staged $EXPECT ($SHA) at $STAGE: preflight and import ok"
 
-# ---- 3. optional: wait for an idle window ----------------------------------------------------
+# ---- 3. require a confirmed idle window ----------------------------------------------------
+case "$MAX_WAIT" in ''|*[!0-9]*) log "FAIL: CU_IDLE_MAX_WAIT must be a non-negative integer"; exit 1;; esac
+started_wait=$SECONDS
 waited=0
-while [ "$MAX_WAIT" -gt 0 ]; do
-  idle="$(status_field idle_seconds)"; serving="$(status_field serving_now)"
-  if [ -z "$idle" ] && [ -z "$(health_version)" ]; then log "gateway not answering; nothing to interrupt"; break; fi
-  # idle_seconds is 0 while a request is open, else seconds since the last one; empty = none served yet.
-  if [ "$serving" = "[]" ] || [ -z "$serving" ]; then
-    if [ -z "$idle" ] || "$PY" -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= float(sys.argv[2]) else 1)' "$idle" "$IDLE_SECONDS"; then
-      log "idle window found after ${waited}s (idle_seconds=${idle:-none})"; break
+if [ "${CU_FORCE_RESTART:-0}" = "1" ]; then
+  log "forced restart requested; active requests may be interrupted"
+else
+  while true; do
+    snapshot="$(curl -fsS --max-time 3 "$BASE/api/status" 2>/dev/null)" || snapshot=""
+    state="$(printf '%s' "$snapshot" | "$PY" "$HERE/upgrade_guard.py" "$IDLE_SECONDS")" || state="unknown"
+    if [ "$state" = "idle" ]; then log "confirmed idle window after ${waited}s"; break; fi
+    waited=$((SECONDS - started_wait))
+    if [ "$waited" -ge "$MAX_WAIT" ]; then
+      log "ABORT: no confirmed idle window in ${MAX_WAIT}s (status=$state); live install left unchanged"
+      rm -rf "$STAGE" "$W"
+      exit 1
     fi
-  fi
-  if [ "$waited" -ge "$MAX_WAIT" ]; then log "no idle window in ${MAX_WAIT}s; proceeding anyway"; break; fi
-  sleep 1; waited=$((waited + 1))
-done
+    sleep 1
+  done
+fi
 
 # ---- 4. the HUD binary does not change between these versions: don't churn it ----------------
 hud_carry_over() {
