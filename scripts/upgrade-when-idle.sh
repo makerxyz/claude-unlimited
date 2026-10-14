@@ -23,6 +23,7 @@
 # Environment: CLAUDE_UNLIMITED_REPO (default: this fork), CLAUDE_UNLIMITED_PORT (4317),
 # CU_IDLE_SECONDS (10), CU_IDLE_MAX_WAIT (1200; 0 = one check),
 # CU_FORCE_RESTART (0; 1 = explicitly accept interrupting active requests),
+# CU_VERIFY_INFERENCE (1; 0 = health/metadata checks only, no billable smoke requests),
 # CU_SRC (use this clean checkout instead of cloning).
 set -uo pipefail
 
@@ -31,6 +32,8 @@ REF="${1:-main}"
 PORT="${CLAUDE_UNLIMITED_PORT:-4317}"
 IDLE_SECONDS="${CU_IDLE_SECONDS:-10}"
 MAX_WAIT="${CU_IDLE_MAX_WAIT:-1200}"
+VERIFY_INFERENCE="${CU_VERIFY_INFERENCE:-1}"
+case "$VERIFY_INFERENCE" in 0|1) ;; *) printf 'CU_VERIFY_INFERENCE must be 0 or 1\n' >&2; exit 1;; esac
 BASE="http://127.0.0.1:${PORT}"
 INSTALL_ROOT="$HOME/.local/share/claude-unlimited"
 BIN_DIR="$HOME/.local/bin"
@@ -166,6 +169,7 @@ best=""; for _ in 1 2 3; do
   sleep 1
 done
 if [ -n "$best" ] && "$PY" -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 1.0 else 1)' "$best"; then log "verify /api/profiles: ok (${best}s)"; else log "verify /api/profiles: FAIL (best '${best}'s, need <1s)"; ok=0; fi
+if [ "$VERIFY_INFERENCE" = "1" ]; then
 proxied="$("$PY" - "$PORT" <<'PYEOF' 2>&1
 import json, sys, urllib.request
 from claude_unlimited.cli import _fetch_placeholder_token
@@ -180,11 +184,15 @@ print("OK" if r.status == 200 and j.get("type") == "message" and j.get("content"
 PYEOF
 )"
 case "$proxied" in OK*) log "verify real proxied request: ok ($proxied)";; *) log "verify real proxied request: FAIL ($(printf '%s' "$proxied" | tail -1 | cut -c1-200))"; ok=0;; esac
+else
+  log "verify inference: skipped by CU_VERIFY_INFERENCE=0; health, package and metadata checks only"
+fi
 
 [ "$ok" -eq 1 ] || rollback
 log "RESULT: UPGRADED to $EXPECT ($SHA); previous install kept at $ROLL"
 
 # ---- 7. informational: one tiny request pinned to each enabled profile (never rolls back) ------
+if [ "$VERIFY_INFERENCE" = "1" ]; then
 "$PY" - "$PORT" <<'PYEOF' 2>&1 | while IFS= read -r line; do log "profile smoke: $line"; done
 import json, sys, urllib.request, urllib.error, urllib.parse
 port = int(sys.argv[1]); base = f"http://127.0.0.1:{port}"
@@ -208,5 +216,6 @@ for p in profiles:
     except Exception as e:
         print(f"{p.get('name')} [{p.get('kind')}]: {type(e).__name__}")
 PYEOF
+fi
 rm -rf "$W" "$STAGE"
 exit 0

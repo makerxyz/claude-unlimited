@@ -75,3 +75,22 @@ def test_upgrade_preflight_rejects_a_package_that_restores_background(tmp_path):
     rejected = subprocess.run(["bash", str(script), str(package)], capture_output=True, text=True)
     assert rejected.returncode == 1
     assert "background launchd service" in rejected.stdout
+
+@pytest.mark.parametrize("enabled,expected_calls", [("0", 0), ("1", 2)])
+def test_metadata_only_upgrade_never_sends_inference(tmp_path, enabled, expected_calls):
+    import os
+    source = (ROOT / "scripts/upgrade-when-idle.sh").read_text()
+    start = source.index('if [ "$VERIFY_INFERENCE" = "1" ]; then')
+    end = source.index('rm -rf "$W" "$STAGE"', start)
+    blocks = source[start:end]
+    fake_python = tmp_path / "fake-python"
+    calls = tmp_path / "calls"
+    fake_python.write_text('#!/bin/sh\ncat >/dev/null\nprintf "call\\n" >> "$TEST_CALLS"\nprintf "OK 200 end_turn\\n"\n')
+    fake_python.chmod(0o700)
+    script = 'set -eu\nlog() { :; }\nrollback() { exit 9; }\nok=1\n' + blocks
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5,
+                            env=dict(os.environ, VERIFY_INFERENCE=enabled, PY=str(fake_python),
+                                     PORT="4317", EXPECT="fixture", SHA="fixture", ROLL="fixture",
+                                     TEST_CALLS=str(calls)))
+    assert result.returncode == 0, result.stderr
+    assert (len(calls.read_text().splitlines()) if calls.exists() else 0) == expected_calls
