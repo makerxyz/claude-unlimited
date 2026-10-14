@@ -21,6 +21,8 @@ encrypted blob is stored as one file per Profile under
 
 from __future__ import annotations
 
+from .errors import MissingToken as _MissingToken
+
 import ctypes
 import ctypes.wintypes as wintypes
 from pathlib import Path
@@ -29,6 +31,10 @@ SECRETS_DIR = Path.home() / ".claude-unlimited" / "secrets"
 
 
 class SecretStoreError(RuntimeError):
+    pass
+
+
+class MissingToken(SecretStoreError, _MissingToken):
     pass
 
 
@@ -85,7 +91,7 @@ def set_token(profile_id: str, token: str) -> None:
 def get_token(profile_id: str) -> str:
     path = _path_for(profile_id)
     if not path.exists():
-        raise SecretStoreError(f"No stored credential found for profile {profile_id!r}.")
+        raise MissingToken(profile_id)
     return _unprotect(path.read_bytes()).decode("utf-8")
 
 

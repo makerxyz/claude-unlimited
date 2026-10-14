@@ -40,13 +40,14 @@ REFRESH_USER_AGENT = "axios/1.9.0"
 
 
 class OAuthLoginError(RuntimeError):
-    def __init__(self, message: str, status_code: Optional[int] = None):
+    def __init__(self, message: str, status_code: Optional[int] = None, error_code: Optional[str] = None):
         super().__init__(message)
         # Lets a caller distinguish a 429 (backoff requested) from a 400
         # (dead refresh_token) without parsing the message text. None for a
         # network-level failure, where there was no response to read a
         # status from.
         self.status_code = status_code
+        self.error_code = error_code
 
 
 @dataclass(frozen=True)
@@ -207,8 +208,13 @@ def refresh_access_token(refresh_token: str, timeout: float = 30.0) -> LoginToke
         if status >= 500 and attempt < max_retries:
             continue  # transient server error: retry
         if status >= 400:
-            detail = body.decode("utf-8", errors="replace")[:300]
-            raise OAuthLoginError(f"Token refresh failed (HTTP {status}): {detail}", status_code=status)
+            try:
+                code = json.loads(body).get("error")
+            except (ValueError, AttributeError):
+                code = None
+            # Never log arbitrary endpoint bodies: a proxy may echo secrets.
+            safe = code if code in ("invalid_grant", "invalid_request", "rate_limit_error", "server_error") else "unavailable"
+            raise OAuthLoginError(f"Token refresh failed (HTTP {status}): {safe}", status_code=status, error_code=safe)
 
         try:
             data = json.loads(body)

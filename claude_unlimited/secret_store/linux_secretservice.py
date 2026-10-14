@@ -22,11 +22,16 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from .errors import MissingToken as _MissingToken
 
 SERVICE = "claude-unlimited.oauth"
 
 
 class SecretStoreError(RuntimeError):
+    pass
+
+
+class MissingToken(SecretStoreError, _MissingToken):
     pass
 
 
@@ -60,8 +65,12 @@ def get_token(profile_id: str) -> str:
         ["secret-tool", "lookup", "service", SERVICE, "account", profile_id],
         capture_output=True, text=True,
     )
-    if result.returncode != 0 or not result.stdout:
-        raise SecretStoreError(f"No stored credential found for profile {profile_id!r}.")
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        raise MissingToken(profile_id)
+    if result.returncode != 0:
+        raise SecretStoreError("Secret Service could not read the credential")
+    if not result.stdout:
+        raise MissingToken(profile_id)
     # secret-tool lookup prints the secret with no trailing newline; strip
     # defensively, matching macos_keychain.get_token.
     return result.stdout.strip()

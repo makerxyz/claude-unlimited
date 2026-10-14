@@ -8,6 +8,7 @@ Callers use claude_unlimited.secret_store, never this module directly.
 from __future__ import annotations
 
 import subprocess
+from .errors import MissingToken
 
 SERVICE_PREFIX = "claude-unlimited.oauth"
 
@@ -30,13 +31,18 @@ def set_token(profile_id: str, token: str) -> None:
 
 def get_token(profile_id: str) -> str:
     service = _service(profile_id)
-    cp = subprocess.run(
-        ["security", "find-generic-password", "-a", profile_id, "-s", service, "-w"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        cp = subprocess.run(
+            ["security", "find-generic-password", "-a", profile_id, "-s", service, "-w"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 44:  # errSecItemNotFound, not a locked/unavailable keychain
+            raise MissingToken(profile_id) from None
+        raise
     return cp.stdout.strip()
 
 

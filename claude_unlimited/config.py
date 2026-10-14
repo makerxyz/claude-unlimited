@@ -40,7 +40,32 @@ def accounts_roots() -> tuple:
 # /api/profiles/* can both load the same old state and drop one change, and
 # their save_pool() calls can collide on the shared ".json.tmp" path and
 # raise FileNotFoundError out of tmp.replace().
-CONFIG_LOCK = threading.Lock()
+class _ConfigTransaction:
+    def __init__(self):
+        self._thread = threading.RLock()
+        self._local = threading.local()
+
+    def __enter__(self):
+        from .credential_lock import locked
+        self._thread.acquire()
+        try:
+            context = locked("config")
+            context.__enter__()
+            stack = getattr(self._local, "stack", [])
+            stack.append(context)
+            self._local.stack = stack
+        except BaseException:
+            self._thread.release()
+            raise
+
+    def __exit__(self, *args):
+        try:
+            self._local.stack.pop().__exit__(*args)
+        finally:
+            self._thread.release()
+
+
+CONFIG_LOCK = _ConfigTransaction()
 
 DEFAULT_SWITCH_THRESHOLD = 98.0
 

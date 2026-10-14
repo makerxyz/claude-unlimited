@@ -685,5 +685,10 @@
   "toast.dismiss": "Închide",
   "activity.filter_since": "Arată evenimente de la",
   "activity.filter_until": "Arată evenimente până la",
-  "modal.confirm.input_label": "Scrie textul de confirmare"
+  "modal.confirm.input_label": "Scrie textul de confirmare",
+  "profile.reauth_instruction": "Conectează-te din nou la acest cont:",
+  "profile.usage_stale": "Utilizare dintr-o verificare anterioară",
+  "profile.usage_checked": "Ultima verificare a utilizării",
+  "profile.usage_read_failed": "Utilizarea nu a putut fi citită; acest lucru nu înseamnă că autentificarea a expirat",
+  "profile.login_renewing": "Autentificarea se reînnoiește automat"
 }

@@ -1108,7 +1108,7 @@ def test_rate_limited_refresh_backs_off_further_each_time(pool_env, monkeypatch)
     monkeypatch.setattr(gw_mod.time, "monotonic", lambda: now[0])
     for _ in range(4):
         try:
-            gw._try_refresh("a", "refresh-tok")
+            gw._exchange_refresh("a", "refresh-tok")
         except gw_mod.oauth_login.OAuthLoginError:
             pass
         waits.append(gw._refresh_check_not_before["a"] - now[0])
@@ -1129,7 +1129,7 @@ def test_a_successful_refresh_clears_the_rate_limit_streak(pool_env, monkeypatch
     monkeypatch.setattr(gw_mod.oauth_login, "refresh_access_token",
                         lambda _t: gw_mod.oauth_login.LoginTokens(
                             access_token="new", refresh_token="r2", expires_at=None))
-    assert gw._try_refresh("a", "refresh-tok").access_token == "new"
+    assert gw._exchange_refresh("a", "refresh-tok").access_token == "new"
     assert "a" not in gw._refresh_rate_limited_streak
 
 
@@ -1421,7 +1421,7 @@ def test_repeated_rate_limits_back_off_but_never_stop_retrying(pool_env, monkeyp
     waits = []
     for _ in range(20):
         try:
-            gw._try_refresh("a", "refresh-tok")
+            gw._exchange_refresh("a", "refresh-tok")
         except gw_mod.oauth_login.OAuthLoginError:
             pass
         deadline = gw._refresh_check_not_before.get("a", now[0])
@@ -1496,7 +1496,7 @@ def test_a_preventive_refresh_stays_responsive(pool_env, monkeypatch):
                             gw_mod.oauth_login.OAuthLoginError("nope", status_code=500)))
     gw = Gateway(transport=lambda req: fake_response(200))
     try:
-        gw._try_refresh("a", "r")
+        gw._exchange_refresh("a", "r")
     except gw_mod.oauth_login.OAuthLoginError:
         pass
     assert gw._refresh_check_not_before["a"] - now[0] == Gateway._REFRESH_CHECK_COOLDOWN_SECONDS

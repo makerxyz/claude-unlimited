@@ -65,3 +65,11 @@ def test_refresh_buffer_outlasts_the_rate_limit_backoff():
         f"refresh buffer {buffer_seconds}s must exceed the post-429 backoff "
         f"{Gateway._RATE_LIMIT_BACKOFF_SECONDS}s")
     assert buffer_seconds - Gateway._RATE_LIMIT_BACKOFF_SECONDS >= 120, "keep at least 2 min of margin"
+
+
+def test_corrupt_expiry_does_not_crash_renewal():
+    for expiry in ['bad', {}, [], True]:
+        import json
+        cred = decode(json.dumps({'access_token': 'fixture-access', 'refresh_token': 'fixture-refresh', 'expires_at': expiry}))
+        assert cred.expires_at is None
+        assert not is_expiring_soon(cred)

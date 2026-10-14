@@ -141,3 +141,39 @@ def test_status_reports_real_version_and_uptime(running_server):
     assert status == 200
     assert body["version"] == daemon.__version__
     assert body["uptime_seconds"] >= 0
+
+
+def test_profile_api_distinguishes_recent_use_from_open_requests_and_dates_usage(running_server, monkeypatch):
+    from datetime import datetime, timezone
+    base, _, store = running_server
+    save_pool(Pool(profiles=[Profile(id='a', name='A', automatic=True)]))
+    store.set_token('a', 'fixture-access')
+    monkeypatch.setattr(daemon._gateway, '_transport', lambda req: fake_response(200, {
+        'anthropic-ratelimit-unified-5h-utilization': '0.12',
+        'anthropic-ratelimit-unified-5h-reset': '4102444800',
+    }))
+    result = daemon._gateway.handle('POST', '/v1/messages', {}, b'{}')
+    _, body = _request(base + '/api/profiles')
+    assert body['profiles'][0]['in_use_now']
+    list(result.body_chunks)
+    _, body = _request(base + '/api/profiles')
+    p = body['profiles'][0]
+    assert not p['in_use_now']
+    assert p['recently_used']
+    assert datetime.fromisoformat(p['usage_updated_at']) <= datetime.now(timezone.utc)
+    assert not p['usage_stale']
+    assert not p['reauth_required']
+    assert 'fixture-access' not in json.dumps(p)
+
+
+def test_usage_read_authorization_error_is_not_a_reauth_requirement(running_server):
+    from claude_unlimited import usage_probe
+    base, _, store = running_server
+    save_pool(Pool(profiles=[Profile(id='a', name='A', automatic=True)]))
+    store.set_token('a', 'fixture-access')
+    daemon._usage_probe.record('a', 'anthropic', usage_probe.ProbeResult(status=401))
+    _, body = _request(base + '/api/profiles')
+    p = body['profiles'][0]
+    assert p['usage_read_error'] == 'usage_unauthorized'
+    assert not p['reauth_required']
+    assert p['usage_stale']

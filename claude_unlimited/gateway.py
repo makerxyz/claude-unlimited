@@ -22,6 +22,7 @@ from __future__ import annotations
 import http.client
 import itertools
 import json
+import math
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -29,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator, Optional
 from urllib.parse import urlparse
 
-from . import activity, eco, gpt_windows, speech, connectors, notifications, oauth_credential, oauth_login, openai_bridge, openai_credential, openai_models, openai_observation, openai_translate, project_attribution, project_usage, runtime_state, secret_store, usage_history, usage_probe, usage_tracking
+from . import credential_lock, activity, eco, gpt_windows, speech, connectors, notifications, oauth_credential, oauth_login, openai_bridge, openai_credential, openai_models, openai_observation, openai_translate, project_attribution, project_usage, runtime_state, secret_store, usage_history, usage_probe, usage_tracking
 from . import profiles as profile_repo
 from .config import Pool, Profile, load_pool
 from .observation import AuthInvalid, BudgetUnavailable, ModelWindow, ProviderUnavailable, QuotaExhausted, ShortRateLimit, Unknown, UsageSnapshot, classify
@@ -888,6 +889,9 @@ class Gateway:
         # (real traffic or usage_probe) — so a background check can skip an
         # account real traffic already refreshed.
         self._usage_observed_at: dict[str, float] = {}
+        self._refresh_rejected: dict[str, str] = {}
+        self._rotated_pending: dict[str, object] = {}
+        self._auth_refresh_capable: dict[str, bool] = {}
         # Monotonic time each Profile's current in-flight streak began. A
         # request that never drains — a client that abandons the stream, or an
         # upstream connection that hangs open — would otherwise leave its
@@ -1021,6 +1025,13 @@ class Gateway:
                 # an AUTH_INVALID Profile) — otherwise a rate-limited account
                 # re-pokes the token endpoint the instant the daemon comes back.
                 self._restore_refresh_backoff(p.id, persisted, now_utc)
+                if isinstance(persisted, dict):
+                    observed = persisted.get("usage_observed_at")
+                    if isinstance(observed, (float, int)) and 0 < observed <= time.time():
+                        self._usage_observed_at[p.id] = observed
+                    rejected = persisted.get("refresh_rejected_generation")
+                    if rejected and rejected == (p.credential_updated_at or "unversioned"):
+                        self._refresh_rejected[p.id] = rejected
                 restored = {
                     **_restorable_usage_fields(persisted, now=now_utc),
                     **_restorable_state_fields(persisted, now=now_utc),
@@ -1055,6 +1066,7 @@ class Gateway:
                     p.credential_updated_at is not None and p.credential_updated_at != rt.credential_seen
                 )
                 if credential_refreshed:
+                    self._refresh_rejected.pop(p.id, None)
                     # A replaced credential is a fresh start: drop any
                     # rate-limit backoff and the given-up state, so a
                     # re-authenticated Profile is retried immediately rather
@@ -1779,6 +1791,7 @@ class Gateway:
         except Exception:
             return None
         cred = oauth_credential.decode(stored)
+        self._auth_refresh_capable[p.id] = bool(cred.refresh_token)
         if not cred.refresh_token:
             return None
         was_auth_invalid = rt.state == ProfileState.AUTH_INVALID
@@ -1795,20 +1808,12 @@ class Gateway:
             refreshed = self._try_refresh(
                 p.id, cred.refresh_token,
                 cooldown=self._REAUTH_RECOVERY_COOLDOWN_SECONDS if was_auth_invalid else None)
-        except oauth_login.OAuthLoginError as exc:
+        except (oauth_login.OAuthLoginError, credential_lock.LockUnavailable) as exc:
             if was_auth_invalid:
                 activity.record("error", f"{p.name} — automatic recovery attempt failed", meta=str(exc)[:200])
             return None
         if refreshed is None:
             return None  # still within the shared backoff window — not due yet
-        try:
-            profile_repo.update_credential(
-                p.id, refreshed.access_token,
-                refresh_token=refreshed.refresh_token or cred.refresh_token,
-                expires_at=refreshed.expires_at,
-            )
-        except Exception:
-            return None
         if was_auth_invalid:
             activity.record("rotation", f"{p.name} — token refreshed automatically, back online")
             return ProfileState.ELIGIBLE
@@ -2133,6 +2138,92 @@ class Gateway:
         return not_before is None or time.monotonic() >= not_before
 
     def _try_refresh(self, profile_id: str, refresh_token: str, *,
+                     cooldown: Optional[float] = None):
+        # Read, exchange, and save under one OS lock. Other processes must see
+        # the rotated credential before they can spend the previous grant.
+        from .credential_lock import locked
+        with locked("profile:" + profile_id):
+            try:
+                latest = oauth_credential.decode(secret_store.get_token(profile_id))
+            except Exception:
+                raise oauth_login.OAuthLoginError("Credential store is temporarily unavailable") from None
+            if latest.refresh_token != refresh_token:
+                return oauth_login.LoginTokens(latest.access_token, latest.refresh_token, latest.expires_at)
+            held = self._rotated_pending.get(profile_id)
+            if held is None:
+                try:
+                    raw_journal = secret_store.get_token("pending." + profile_id)
+                except KeyError:
+                    raw_journal = None  # MissingToken is a positive absence result
+                except Exception:
+                    raise oauth_login.OAuthLoginError("Credential recovery record is unavailable; refresh deferred") from None
+                if raw_journal is not None:
+                    try:
+                        journal = json.loads(raw_journal)
+                        fields = ("access_token", "refresh_token", "source_refresh_token")
+                        if not isinstance(journal, dict) or any(
+                                not isinstance(journal.get(field), str) or not journal[field].strip()
+                                for field in fields):
+                            raise ValueError("invalid journal")
+                        expiry = journal.get("expires_at")
+                        if expiry is not None and (isinstance(expiry, bool) or
+                                not isinstance(expiry, (int, float)) or not math.isfinite(expiry) or expiry <= 0):
+                            raise ValueError("invalid journal expiry")
+                        held = (journal["source_refresh_token"], oauth_login.LoginTokens(
+                            journal["access_token"], journal["refresh_token"], expiry))
+                    except Exception:
+                        raise oauth_login.OAuthLoginError("Credential recovery record is invalid; refresh deferred") from None
+            if held is not None:
+                source, pending = held
+                if latest.refresh_token in (source, pending.refresh_token):
+                    self._rotated_pending[profile_id] = held
+                    self._save_rotated(profile_id, pending, source)
+                    return pending
+                # A human login supersedes the journal; never overwrite it.
+                self._rotated_pending.pop(profile_id, None)
+            rejected = self._refresh_rejected.get(profile_id)
+            profile = load_pool().get(profile_id)
+            if rejected and profile and rejected == (profile.credential_updated_at or "unversioned"):
+                return None
+            try:
+                result = self._exchange_refresh(profile_id, refresh_token, cooldown=cooldown)
+            except (oauth_login.OAuthLoginError, credential_lock.LockUnavailable) as exc:
+                if getattr(exc, "error_code", None) == "invalid_grant":
+                    profile = load_pool().get(profile_id)
+                    self._refresh_rejected[profile_id] = (profile.credential_updated_at or "unversioned") if profile else "unversioned"
+                    with self._lock:
+                        rt = self._runtime.get(profile_id)
+                        if rt is not None:
+                            self._runtime[profile_id] = _replace_runtime(rt, state=ProfileState.AUTH_INVALID)
+                    self._persist()
+                raise
+            if result is not None and latest.refresh_token:
+                self._rotated_pending[profile_id] = (refresh_token, result)
+                self._save_rotated(profile_id, result, refresh_token)
+            return result
+
+    def _save_rotated(self, profile_id, tokens, source):
+        # The spent token is never exchanged again after a failed save.
+        # Bounded local retries; the pending value remains private in memory.
+        for attempt in range(3):
+            try:
+                journal = json.loads(oauth_credential.encode(oauth_credential.StoredOAuthCredential(
+                    tokens.access_token, tokens.refresh_token, tokens.expires_at)))
+                journal["source_refresh_token"] = source
+                secret_store.set_token("pending." + profile_id, json.dumps(journal))
+                profile_repo.update_credential(profile_id, tokens.access_token,
+                    refresh_token=tokens.refresh_token, expires_at=tokens.expires_at)
+                self._rotated_pending.pop(profile_id, None)
+                try:
+                    secret_store.delete_token("pending." + profile_id)
+                except Exception:
+                    pass  # replacement is already durable; a stale journal is ignored
+                return
+            except Exception:
+                if attempt == 2:
+                    raise oauth_login.OAuthLoginError("Could not save the rotated credential; retrying the save before another exchange")
+
+    def _exchange_refresh(self, profile_id: str, refresh_token: str, *,
                       cooldown: Optional[float] = None) -> Optional["oauth_login.LoginTokens"]:
         """The ONE place that actually calls oauth_login.refresh_access_token
         — shared by _maybe_refresh_credential (the per-request path, called
@@ -2172,8 +2263,8 @@ class Gateway:
             self._refresh_in_progress.add(profile_id)
         try:
             tokens = oauth_login.refresh_access_token(refresh_token)
-        except oauth_login.OAuthLoginError as exc:
-            if exc.status_code == 429:
+        except (oauth_login.OAuthLoginError, credential_lock.LockUnavailable) as exc:
+            if getattr(exc, "status_code", None) == 429:
                 # Anthropic's own rate limiter, not a dead credential —
                 # retrying this every _REFRESH_CHECK_COOLDOWN_SECONDS (60s)
                 # never let the window actually clear, since each attempt
@@ -2227,7 +2318,7 @@ class Gateway:
             return cred.access_token
         try:
             refreshed = self._try_refresh(profile.id, cred.refresh_token)
-        except oauth_login.OAuthLoginError as exc:
+        except (oauth_login.OAuthLoginError, credential_lock.LockUnavailable) as exc:
             # Previously silent — a Profile could sit here failing to
             # refresh every single request with zero trace anywhere,
             # indistinguishable from "nothing tried." Now visible in
@@ -2238,28 +2329,6 @@ class Gateway:
             return cred.access_token
         if refreshed is None:
             return cred.access_token  # still within the shared backoff window — not due yet
-        try:
-            profile_repo.update_credential(
-                profile.id, refreshed.access_token,
-                refresh_token=refreshed.refresh_token or cred.refresh_token,
-                expires_at=refreshed.expires_at,
-            )
-        except Exception as exc:
-            # Anthropic ROTATES the refresh token on every refresh: the one we
-            # just spent is now dead server-side. If persisting the replacement
-            # fails we are left holding an invalidated token, every future
-            # refresh fails with invalid_grant, and the Profile ends up needing
-            # a full manual re-auth. This used to be a bare `pass`, so the one
-            # failure that causes exactly that left no trace anywhere and had
-            # to be inferred. This request still succeeds on the
-            # token we just got — but say so loudly, because it is the last
-            # one that will work.
-            activity.record("error", f"{profile.name} — could not save refreshed credential",
-                             meta=f"re-auth will be required: {str(exc)[:160]}")
-            notifications.notify_if_enabled(
-                "needs_attention", "Claude Unlimited",
-                f"{profile.name}: could not save its refreshed login — it will need re-authentication.",
-                load_pool().settings)
         return refreshed.access_token
 
     def force_active(self, profile_id: str) -> bool:
@@ -2541,6 +2610,8 @@ class Gateway:
                 backoff[pid] = (until, streak if streak > 0 else None)
             profiles = {
                 pid: {
+                    "usage_observed_at": self._usage_observed_at.get(pid),
+                    "refresh_rejected_generation": self._refresh_rejected.get(pid),
                     "last_usage_percent": rt.last_usage_percent,
                     "resets_at": rt.resets_at.isoformat() if rt.resets_at else None,
                     "last_usage_percent_7d": rt.last_usage_percent_7d,
@@ -2964,6 +3035,15 @@ class Gateway:
             if percent is not None and percent >= headroom:
                 return   # the account-level numbers already explain this
         self._request_usage_recheck(profile_id)
+
+    def auth_health(self, profile_id: str) -> str:
+        with self._lock:
+            rt = self._runtime.get(profile_id)
+            if rt is None or rt.state != ProfileState.AUTH_INVALID:
+                return "available" if profile_id in self._usage_observed_at else "unknown"
+            if profile_id in self._refresh_rejected or self._auth_refresh_capable.get(profile_id) is False:
+                return "reauth_required"
+            return "refresh_pending"
 
     def usage_observed_at(self) -> dict:
         """Profile id -> epoch seconds of its last usage reading."""
