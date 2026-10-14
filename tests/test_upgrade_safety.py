@@ -94,3 +94,26 @@ def test_metadata_only_upgrade_never_sends_inference(tmp_path, enabled, expected
                                      TEST_CALLS=str(calls)))
     assert result.returncode == 0, result.stderr
     assert (len(calls.read_text().splitlines()) if calls.exists() else 0) == expected_calls
+
+
+def test_staged_import_failure_aborts_before_touching_live_install(tmp_path):
+    import os
+    source = (ROOT / "scripts/upgrade-when-idle.sh").read_text()
+    start = source.index('STAGED_VERSION=')
+    end = source.index('# (pip writes', start)
+    stage = tmp_path / "stage"
+    (stage / "venv/bin").mkdir(parents=True)
+    fake_python = stage / "venv/bin/python"
+    # An interpreter representing an incomplete wheel; importing the daemon
+    # fails even though a source-tree version check could have succeeded.
+    fake_python.write_text('#!/bin/sh\n[ "$PWD" = / ] || exit 8\n[ "$1" = -I ] || exit 8\nexit 1\n')
+    fake_python.chmod(0o700)
+    live = tmp_path / "live"
+    live.mkdir()
+    script = 'set -eu\nlog() { printf "%s\\n" "$*"; }\n' + source[start:end] + '\nprintf "SWAP_ALLOWED\\n"\n'
+    result = subprocess.run(["bash", "-c", script], cwd=ROOT, capture_output=True, text=True,
+                            env=dict(os.environ, STAGE=str(stage), EXPECT="fixture"), timeout=5)
+    assert result.returncode == 1
+    assert "staged daemon/CLI imports; live install left unchanged" in result.stdout
+    assert "SWAP_ALLOWED" not in result.stdout
+    assert live.is_dir()
