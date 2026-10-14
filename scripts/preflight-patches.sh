@@ -26,6 +26,9 @@ echo "== PR #15 dashboard load";              has db.py 'class _ReadPool' "read 
 echo "== PR #18 poll cancel";                 has static/app.js 'function cancelLivePoll' "cancel"; has static/app.js '_livePollController' "abort controller"
 echo "== fork is the only update source"
 has updater.py 'GITHUB_OWNER = "makerxyz"' "updater owner"; hasnt updater.py 'DevDock-AI' "upstream owner"
+echo "== interactive gateway scheduling"
+has daemon_installer/macos_launchd.py '"ProcessType": "Interactive"' "interactive launchd service"
+hasnt daemon_installer/macos_launchd.py '"ProcessType": "Background"' "background launchd service"
 echo "== superseded local patches must be gone"
 hasnt db.py 'def reporting_query' "read-only reporting connection"; hasnt db.py 'def cached_usage_query' "5 s usage cache"; hasnt usage_history.py 'snapshot=' "snapshot= plumbing"
 [ $fail -eq 0 ] && echo "PREFLIGHT PASS" || echo "PREFLIGHT FAIL"; exit $fail

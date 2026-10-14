@@ -428,6 +428,11 @@ class Scheduler:
         return None
 
     # -- persistence --
+    def diagnostics(self) -> dict:
+        """Credential-free snapshot for status displays."""
+        with self._lock:
+            return {pid: dict(entry) for pid, entry in self._loaded()["profiles"].items()}
+
     def _file(self) -> Path:
         return self._state_file or (config.APP_DIR / "usage_probe_state.json")
 

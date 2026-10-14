@@ -685,5 +685,10 @@
   "toast.dismiss": "Descartar",
   "activity.filter_since": "Mostrar eventos desde",
   "activity.filter_until": "Mostrar eventos hasta",
-  "modal.confirm.input_label": "Escribe el texto de confirmación"
+  "modal.confirm.input_label": "Escribe el texto de confirmación",
+  "profile.reauth_instruction": "Vuelve a iniciar sesión en esta cuenta:",
+  "profile.usage_stale": "Uso de una consulta anterior",
+  "profile.usage_checked": "Última consulta de uso",
+  "profile.usage_read_failed": "No se pudo consultar el uso; esto por sí solo no significa que la sesión haya caducado",
+  "profile.login_renewing": "Renovando la sesión automáticamente"
 }

@@ -63,7 +63,8 @@ def decode(raw: str) -> StoredOAuthCredential:
                 return StoredOAuthCredential(
                     access_token=data["access_token"],
                     refresh_token=data.get("refresh_token"),
-                    expires_at=data.get("expires_at"),
+                    expires_at=(data.get("expires_at") if isinstance(data.get("expires_at"), (int, float))
+                                and not isinstance(data.get("expires_at"), bool) else None),
                 )
         except json.JSONDecodeError:
             pass

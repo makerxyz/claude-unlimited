@@ -36,6 +36,29 @@ def fake_response(status, headers=None, body=b"ok"):
     return UpstreamResponse(status=status, headers=headers or {}, body_chunks=chunks(), connection=FakeConnection())
 
 
+def test_one_completed_request_does_not_hide_another_on_the_same_profile(pool_env):
+    save_pool(Pool(profiles=[Profile(id="a", name="A", kind="oauth", automatic=True, enabled=True)]))
+    gw = Gateway(transport=lambda req: fake_response(200))
+    first = gw.handle("POST", "/v1/messages", {}, b"{}")
+    second = gw.handle("POST", "/v1/messages", {}, b"{}")
+    list(first.body_chunks)
+    assert gw.serving_now_ids() == {"a"}
+    assert not gw.is_idle(10)
+    list(second.body_chunks)
+    assert gw.serving_now_ids() == set()
+
+
+def test_an_open_response_is_busy_even_past_the_dashboard_stale_cap(pool_env):
+    save_pool(Pool(profiles=[Profile(id="a", name="A", kind="oauth", automatic=True, enabled=True)]))
+    gw = Gateway(transport=lambda req: fake_response(200))
+    result = gw.handle("POST", "/v1/messages", {}, b"{}")
+    gw._in_flight_since["a"] = real_time.monotonic() - gw._IN_FLIGHT_MAX_SECONDS - 1
+    assert gw.serving_now_ids() == {"a"}
+    assert not gw.is_idle(10)
+    list(result.body_chunks)
+    assert gw.serving_now_ids() == set()
+
+
 @pytest.fixture
 def pool_env(monkeypatch, tmp_path):
     monkeypatch.setattr("claude_unlimited.config.APP_DIR", tmp_path)
@@ -1085,7 +1108,7 @@ def test_rate_limited_refresh_backs_off_further_each_time(pool_env, monkeypatch)
     monkeypatch.setattr(gw_mod.time, "monotonic", lambda: now[0])
     for _ in range(4):
         try:
-            gw._try_refresh("a", "refresh-tok")
+            gw._exchange_refresh("a", "refresh-tok")
         except gw_mod.oauth_login.OAuthLoginError:
             pass
         waits.append(gw._refresh_check_not_before["a"] - now[0])
@@ -1106,7 +1129,7 @@ def test_a_successful_refresh_clears_the_rate_limit_streak(pool_env, monkeypatch
     monkeypatch.setattr(gw_mod.oauth_login, "refresh_access_token",
                         lambda _t: gw_mod.oauth_login.LoginTokens(
                             access_token="new", refresh_token="r2", expires_at=None))
-    assert gw._try_refresh("a", "refresh-tok").access_token == "new"
+    assert gw._exchange_refresh("a", "refresh-tok").access_token == "new"
     assert "a" not in gw._refresh_rate_limited_streak
 
 
@@ -1398,7 +1421,7 @@ def test_repeated_rate_limits_back_off_but_never_stop_retrying(pool_env, monkeyp
     waits = []
     for _ in range(20):
         try:
-            gw._try_refresh("a", "refresh-tok")
+            gw._exchange_refresh("a", "refresh-tok")
         except gw_mod.oauth_login.OAuthLoginError:
             pass
         deadline = gw._refresh_check_not_before.get("a", now[0])
@@ -1473,7 +1496,7 @@ def test_a_preventive_refresh_stays_responsive(pool_env, monkeypatch):
                             gw_mod.oauth_login.OAuthLoginError("nope", status_code=500)))
     gw = Gateway(transport=lambda req: fake_response(200))
     try:
-        gw._try_refresh("a", "r")
+        gw._exchange_refresh("a", "r")
     except gw_mod.oauth_login.OAuthLoginError:
         pass
     assert gw._refresh_check_not_before["a"] - now[0] == Gateway._REFRESH_CHECK_COOLDOWN_SECONDS

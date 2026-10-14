@@ -685,5 +685,10 @@
   "toast.dismiss": "Dismiss",
   "activity.filter_since": "Show events from",
   "activity.filter_until": "Show events until",
-  "modal.confirm.input_label": "Type the confirmation text"
+  "modal.confirm.input_label": "Type the confirmation text",
+  "profile.reauth_instruction": "Sign back into this account:",
+  "profile.usage_stale": "Usage is from an earlier reading",
+  "profile.usage_checked": "Usage last checked",
+  "profile.usage_read_failed": "Usage could not be read; this alone does not mean your login expired",
+  "profile.login_renewing": "Renewing login automatically"
 }

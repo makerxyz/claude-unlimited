@@ -1448,10 +1448,15 @@ function renderUsageBar(label, pct, has, threshold, color) {
 // Per-model weekly windows ("Fable weekly"), from the background usage reads —
 // the same numbers Claude Code's /usage prints. Information only: rotation
 // does not switch accounts on them yet, which the detail modal says.
+function profileUsageColor(p, percent, weekly = false) {
+  if (p.usage_stale) return 'var(--text-faint)';
+  return weekly ? weeklyBarColor(p.status_word, percent) : barColor(p.status_word, percent, p.switch_threshold);
+}
+
 function modelUsageBars(p) {
   return (p.model_usage || []).map((w) =>
     renderUsageBar(t('profile.model_window').replace('{model}', w.name), w.percent, true, null,
-      weeklyBarColor(p.status_word, w.percent))).join('');
+      profileUsageColor(p, w.percent, true))).join('');
 }
 
 // Shown only while requests are actually being charged to prepaid credits
@@ -1491,7 +1496,7 @@ function formatCredits(balance) {
 // under the account name.
 function modelUsageChips(p) {
   const chips = (p.model_usage || []).map((w) =>
-    `<span class="model-usage-chip" title="${esc(t('profile.model_window_note'))}" style="color:${weeklyBarColor(p.status_word, w.percent)}">${esc(t('profile.model_window').replace('{model}', w.name))} ${w.percent}%</span>`).join('');
+    `<span class="model-usage-chip" title="${esc(t('profile.model_window_note'))}" style="color:${profileUsageColor(p, w.percent, true)}">${esc(t('profile.model_window').replace('{model}', w.name))} ${w.percent}%</span>`).join('');
   return chips ? `<div class="model-usage-line">${chips}</div>` : '';
 }
 
@@ -1549,6 +1554,17 @@ function usageWindowLabelOrBlank(rawLabel) {
   return rawLabel ? usageWindowLabel(rawLabel, '') : '';
 }
 
+function profileRuntimeNotice(p) {
+  const needsLogin = p.reauth_required ?? (p.state === 'auth_invalid');
+  const renewing = p.auth_health === 'refresh_pending';
+  const state = p.enabled && p.status_word !== 'healthy'
+    ? `<span class="p-status-word" style="color:${renewing ? 'var(--warn)' : (STATUS_COLORS[p.status_word] || {}).color || 'var(--text-dim)'}">${esc(renewing ? t('profile.login_renewing') : statusLabel(p.status_word))}</span>` : '';
+  const instruction = needsLogin
+    ? `<div style="color:var(--bad)">${esc(t('profile.reauth_instruction'))} <code>claude-unlimited reauth</code></div>` : '';
+  const freshness = p.kind === 'api' ? '' : `<div style="color:var(--text-dim);font-size:11px">${esc(t(p.usage_stale ? 'profile.usage_stale' : 'profile.usage_checked'))}${p.usage_updated_at ? ' · ' + esc(new Date(p.usage_updated_at).toLocaleString()) : ''}${p.usage_read_error ? ' · ' + esc(t('profile.usage_read_failed')) : ''}</div>`;
+  return `${state}${instruction}${freshness}`;
+}
+
 function renderProfileCard(p) {
   const isActive = (_lastStatus && _lastStatus.current_profile_id === p.id) || p.live_agents > 0;
   const statusColors = STATUS_COLORS[p.status_word] || { color: 'var(--good)', bg: 'var(--good-soft)' };
@@ -1560,10 +1576,10 @@ function renderProfileCard(p) {
     p.kind === 'codex' ? (p.auth_mode === 'api_key' ? esc(p.base_url || 'api.openai.com') : '') :
     esc(p.base_url || 'api.anthropic.com');
 
-  const has5h = p.usage_5h_percent !== null && p.usage_5h_percent !== undefined;
-  const has7d = p.usage_7d_percent !== null && p.usage_7d_percent !== undefined;
-  const fillColor5h = barColor(p.status_word, p.usage_5h_percent, p.switch_threshold);
-  const fillColor7d = weeklyBarColor(p.status_word, p.usage_7d_percent);
+  const has5h = p.usage_5h_percent !== null && p.usage_5h_percent !== undefined && !(p.usage_expired_windows || []).includes('5h');
+  const has7d = p.usage_7d_percent !== null && p.usage_7d_percent !== undefined && !(p.usage_expired_windows || []).includes('7d');
+  const fillColor5h = profileUsageColor(p, p.usage_5h_percent);
+  const fillColor7d = profileUsageColor(p, p.usage_7d_percent, true);
 
   const bar5h = renderUsageBar(usageWindowLabel(p.usage_window_label, primaryWindowFallbackKey(p)), p.usage_5h_percent, has5h, p.switch_threshold, fillColor5h);
   // No second window (codex accounts, typically) — render nothing rather
@@ -1582,7 +1598,7 @@ function renderProfileCard(p) {
       </div>`;
   // codex uses switch_threshold like oauth (its backend returns
   // percentage-based quota headers); only api kind gets the token budget.
-  const usageBlock = p.kind !== 'api' ? `${bar5h}${bar7d}${modelUsageBars(p)}` : `
+  const usageBlock = p.kind !== 'api' ? `${bar5h}${bar7d}${modelUsageBars(p)}${profileRuntimeNotice(p)}` : `
     ${tokensRow}
     <div class="bar-group">
       <div class="bar-label-row"><span>${esc(t('profile.cost_estimated'))}</span><span class="mono-num">${p.cost_usd_total !== null ? '$' + p.cost_usd_total.toFixed(2) : '—'}</span></div>
@@ -1695,15 +1711,15 @@ function oauthKindLabel(p) {
 function renderProfileTableRow(p) {
   const isActive = (_lastStatus && _lastStatus.current_profile_id === p.id) || p.live_agents > 0;
   const kindLabel = oauthKindLabel(p);
-  const has5h = p.usage_5h_percent !== null && p.usage_5h_percent !== undefined;
-  const has7d = p.usage_7d_percent !== null && p.usage_7d_percent !== undefined;
+  const has5h = p.usage_5h_percent !== null && p.usage_5h_percent !== undefined && !(p.usage_expired_windows || []).includes('5h');
+  const has7d = p.usage_7d_percent !== null && p.usage_7d_percent !== undefined && !(p.usage_expired_windows || []).includes('7d');
 
   const barCell = (rawLabel, pct, has, isWeekly) => {
     // The 7d/weekly column has no switch_threshold concept (same as the
     // card and Detail modal) — no marker to draw, and its own fixed-band
     // color rule (weeklyBarColor) instead of the 5h column's
     // threshold-relative one.
-    const fillColor = isWeekly ? weeklyBarColor(p.status_word, pct) : barColor(p.status_word, pct, p.switch_threshold);
+    const fillColor = profileUsageColor(p, pct, isWeekly);
     const marker = isWeekly ? '' : `<div class="bar-threshold" style="left:${Math.min(100, p.switch_threshold)}%"></div>`;
     // Only show a label word when there is a real one (a codex window
     // duration) — the column header already says "5h"/"7d" for oauth, and
@@ -1742,7 +1758,7 @@ function renderProfileTableRow(p) {
         <div class="p-icon${tagClass}${p.kind === 'codex' ? ' kind-codex' : ''}">${kindIcon(p)}</div>
         <div class="row-name-text">
           <div class="p-name">${esc(p.name)} ${planBadge(p)}${subagentTag(p)}${fableLeaveTag(p)}${liveAgentsPill(p)}${p.in_use_now ? `<span class="used-now-pill"><span class="used-now-dot"></span>${esc(t('profiles.used_now_tag'))}</span>` : ''}${creditsPill(p)}${paymentRequiredBadge(p)}</div>
-          <div class="p-kind">${kindLabel}</div>${modelUsageChips(p)}
+          <div class="p-kind">${kindLabel}</div>${profileRuntimeNotice(p)}${modelUsageChips(p)}
         </div>
       </div>
       ${usageCells}
@@ -2177,11 +2193,11 @@ function openProfileDetailModal(profileId) {
       </div>`;
     document.getElementById('pd_token_threshold_input').value = p.token_threshold != null ? p.token_threshold : '';
   } else {
-    const has5h = p.usage_5h_percent !== null && p.usage_5h_percent !== undefined;
-    const has7d = p.usage_7d_percent !== null && p.usage_7d_percent !== undefined;
+    const has5h = p.usage_5h_percent !== null && p.usage_5h_percent !== undefined && !(p.usage_expired_windows || []).includes('5h');
+    const has7d = p.usage_7d_percent !== null && p.usage_7d_percent !== undefined && !(p.usage_expired_windows || []).includes('7d');
     const barGroup = (label, pct, has, showThreshold) =>
       renderUsageBar(label, pct, has, showThreshold ? p.switch_threshold : null,
-        showThreshold ? barColor(p.status_word, pct, p.switch_threshold) : weeklyBarColor(p.status_word, pct));
+        profileUsageColor(p, pct, !showThreshold));
     const resetIn = formatFutureRelative(p.usage_5h_resets_at);
     // No second window (codex accounts, typically) — render nothing rather
     // than an empty "7d" bar-group. See usageWindowLabel.

@@ -762,7 +762,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             # Aggregated in SQL, not by loading the table: the Dashboard polls
             # this once a second and the table grows forever.
             usage_map = usage_history.totals_by_profile()
-            in_flight = _gateway.in_flight_ids()
+            in_flight = _gateway.serving_now_ids()
+            observed = _gateway.usage_observed_at()
+            recent = _gateway.in_flight_ids()
+            probe_state = _usage_probe.diagnostics()
             items = [_profile_to_public_dict(p, runtime_map.get(p.id), usage_map.get(p.id), p.id in in_flight)
                      for p in profile_repo.list_profiles()]
             live_agents = _gateway.live_agent_counts()
@@ -771,6 +774,21 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             now_utc = datetime.now(timezone.utc)
             for item in items:
                 item["live_agents"] = live_agents.get(item["id"], 0)
+                item["recently_used"] = item["id"] in recent and item["id"] not in in_flight
+                measured = observed.get(item["id"])
+                item["usage_updated_at"] = datetime.fromtimestamp(measured, timezone.utc).isoformat() if measured else None
+                item["usage_stale"] = measured is None or time.time() - measured > 600
+                item["usage_expired_windows"] = []
+                for window in ("5h", "7d"):
+                    reset = item.get("usage_" + window + "_resets_at")
+                    if reset and datetime.fromisoformat(reset) <= now_utc:
+                        item["usage_expired_windows"].append(window)
+                        item["usage_stale"] = True
+                probe_error = probe_state.get(item["id"], {}).get("kind")
+                item["usage_read_error"] = "usage_unauthorized" if probe_error == "auth" else probe_error
+                item["auth_health"] = _gateway.auth_health(item["id"])
+                item["reauth_required"] = item["auth_health"] == "reauth_required"
+                item["reauth_command"] = "claude-unlimited reauth" if item["reauth_required"] else None
                 # The widget's "serving now" block. last_* is the latest
                 # COMPLETED request (usage is recorded once known), so it is
                 # labelled as the latest, never as what is running this second.

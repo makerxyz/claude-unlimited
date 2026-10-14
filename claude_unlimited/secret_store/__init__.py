@@ -10,6 +10,7 @@ changes.
 from __future__ import annotations
 
 import platform
+from .errors import MissingToken
 
 _SYSTEM = platform.system()
 

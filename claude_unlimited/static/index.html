@@ -154,7 +154,7 @@
   /* ---- shell ---- */
   /* Bottom padding clears the fixed support pill, which would otherwise
      overlap whatever content ends the page (the Overview heatmap). */
-  .main { flex: 1; padding: 24px 30px 24px; position: relative; z-index: 1; display: flex; justify-content: center; }
+  .main { flex: 1; min-width: 0; padding: 24px 30px 24px; position: relative; z-index: 1; display: flex; justify-content: center; }
   .main-inner { max-width: 1180px; width: 100%; min-width: 0; }
   .view[style*="display:none"] { display: none; }
 
@@ -829,11 +829,11 @@
   .filter-chip .dot { width: 6px; height: 6px; border-radius: 50%; }
   .filter-chip.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
 
-  .table { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
-  .table-head { display: grid; grid-template-columns: 30px 1.8fr 1.2fr 1.2fr 110px 76px 90px; gap: 12px; padding: 12px 18px;
+  .table { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 14px; overflow-x: auto; }
+  .table-head { display: grid; min-width: 950px; grid-template-columns: 30px minmax(260px, 1.8fr) minmax(120px, 1.2fr) minmax(120px, 1.2fr) 110px 76px 90px; gap: 12px; padding: 12px 18px;
                 font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
                 border-bottom: 1px solid var(--border); }
-  .row { display: grid; grid-template-columns: 30px 1.8fr 1.2fr 1.2fr 110px 76px 90px; gap: 12px; align-items: center;
+  .row { display: grid; min-width: 950px; grid-template-columns: 30px minmax(260px, 1.8fr) minmax(120px, 1.2fr) minmax(120px, 1.2fr) 110px 76px 90px; gap: 12px; align-items: center;
          padding: 14px 18px; border-bottom: 1px solid var(--border-soft); animation: fade-up 350ms ease-out both;
          box-shadow: inset 3px 0 0 transparent; transition: box-shadow 250ms ease; }
   .row.has-tag { box-shadow: inset 3px 0 0 var(--tag-color); }

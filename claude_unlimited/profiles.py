@@ -160,6 +160,14 @@ def find_by_account_uuid(account_uuid: str) -> Optional[Profile]:
 
 
 def update_credential(profile_id: str, credential: str, *, refresh_token: Optional[str] = None,
+                      expires_at: Optional[int] = None) -> None:
+    from .credential_lock import locked
+    with locked("profile:" + profile_id):
+        _update_credential_locked(profile_id, credential, refresh_token=refresh_token,
+                                  expires_at=expires_at)
+
+
+def _update_credential_locked(profile_id: str, credential: str, *, refresh_token: Optional[str] = None,
                        expires_at: Optional[int] = None) -> None:
     if not credential or len(credential.strip()) < 8:
         raise ValidationError("Credential looks too short — paste the complete token/key.")
