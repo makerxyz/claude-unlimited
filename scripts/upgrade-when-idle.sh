@@ -88,7 +88,8 @@ cp -R "$SRC" "$STAGE/app" && rm -rf "$STAGE/app/.git" && find "$STAGE/app" -type
 grep -rlI --null -e "$STAGE/venv" "$STAGE/venv/bin" 2>/dev/null | xargs -0 perl -pi -e "s#\Q$STAGE/venv\E#$INSTALL_ROOT/venv#g"
 SITE="$(ls -d "$STAGE"/venv/lib/python3*/site-packages | head -1)"
 "$HERE/preflight-patches.sh" "$SITE" >/dev/null || { log "FAIL: preflight on the staged venv"; rm -rf "$STAGE"; exit 1; }
-STAGED_VERSION="$("$STAGE/venv/bin/python" -c 'import claude_unlimited; print(claude_unlimited.__version__)')"
+STAGED_VERSION="$(cd / && "$STAGE/venv/bin/python" -I -c 'import claude_unlimited, claude_unlimited.daemon, claude_unlimited.cli; print(claude_unlimited.__version__)')" ||
+  { log "FAIL: staged daemon/CLI imports; live install left unchanged"; rm -rf "$STAGE"; exit 1; }
 [ "$STAGED_VERSION" = "$EXPECT" ] || { log "FAIL: staged venv imports $STAGED_VERSION, wanted $EXPECT"; rm -rf "$STAGE"; exit 1; }
 # (pip writes either a plain shebang or an sh trampoline when the path is long; both name the interpreter)
 { grep -qF "$INSTALL_ROOT/venv/bin/python" "$STAGE/venv/bin/claude-unlimited" && ! grep -rqF "$STAGE" "$STAGE/venv/bin"; } ||
